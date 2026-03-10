@@ -1,26 +1,9 @@
----
-name: "OBSERVA4J - Unified Observability"
-description: "Unified observability extension for Quarkus - structured logging, distributed tracing, metrics, and audit"
+name: Observa4j
+#description: Do something useful.
 metadata:
-  keywords:
-    - "logging"
-    - "observability"
-    - "tracing"
-    - "metrics"
-    - "audit"
-    - "opentelemetry"
-    - "prometheus"
-    - "structured-logging"
-  categories:
-    - "observability"
-    - "monitoring"
-  status: "preview"
-  guide: "https://github.com/observa4j/observa4j"
-  codestart-name: "observa4j"
-  built-with: "Quarkus"
-  extension-dependencies:
-    - "io.quarkus:quarkus-arc"
-    - "io.quarkus:quarkus-opentelemetry"
-    - "io.quarkus:quarkus-micrometer"
-    - "io.quarkus:quarkus-logging-json"
-    - "io.quarkus:quarkus-smallrye-health"
+#  keywords:
+#    - observa4j
+#  guide: https://docs.quarkiverse.io/observa4j/dev/ # To create and publish this guide, see https://github.com/quarkiverse/quarkiverse/wiki#documenting-your-extension
+#  categories:
+#    - "miscellaneous"
+#  status: "preview"
