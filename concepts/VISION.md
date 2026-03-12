@@ -380,12 +380,14 @@ See [Open Questions](reference/OPEN_QUESTIONS.md) for the full list. Items #1–
 - Taylor Scott — _"Logging in Production"_, SolidusConf 2020
 - Chris Richardson — [Microservices.io: Application Logging](https://microservices.io/patterns/observability/application-logging.html)
 - Chris Richardson — [Microservices.io: Distributed Tracing](https://microservices.io/patterns/observability/distributed-tracing.html)
-- Chris Richardson — [Microservices.io: Audit Logging](https://microservices.io/patterns/observability/audit-logging.html)
-- Chris Richardson — [Microservices.io: Application Metrics](https://microservices.io/patterns/observability/application-metrics.html)
 - Chris Richardson — [Microservices.io: Exception Tracking](https://microservices.io/patterns/observability/exception-tracking.html)
-- Chris Richardson — [Microservices.io: Health Check API](https://microservices.io/patterns/observability/health-check-api.html)
+- Chris Richardson — [Microservices.io: Audit Logging](https://microservices.io/patterns/observability/audit-logging.html)
 - Iluwatar — [java-design-patterns: microservices-log-aggregation](https://github.com/iluwatar/java-design-patterns/tree/master/microservices-log-aggregation)
 - Iluwatar — [java-design-patterns: microservices-distributed-tracing](https://github.com/iluwatar/java-design-patterns/tree/master/microservices-distributed-tracing)
+
+- Chris Richardson — [Microservices.io: Application Metrics](https://microservices.io/patterns/observability/application-metrics.html)
+- Chris Richardson — [Microservices.io: Health Check API](https://microservices.io/patterns/observability/health-check-api.html)
+
 - [OpenTelemetry Specification](https://opentelemetry.io/docs/specs/)
 - [W3C TraceContext Recommendation](https://www.w3.org/TR/trace-context/)
 - [Quarkus 3.x — OpenTelemetry Guide](https://quarkus.io/guides/opentelemetry)
