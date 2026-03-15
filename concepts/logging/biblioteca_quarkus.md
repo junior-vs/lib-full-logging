@@ -19,6 +19,18 @@ A versão SLF4J + Log4j2 é portável entre containers Jakarta EE. O Quarkus, po
 arquitetura de compilação nativa (GraalVM) e modelo reativo, impõe restrições e oferece
 alternativas superiores em cada camada:
 
+**Premissa arquitetural preservada:** independente da implementação, o log é tratado como
+um **fluxo *append-only*** — cada evento é acrescentado ao final do fluxo, nunca
+modificado retroativamente. Em uma arquitetura de microsserviços com múltiplas instâncias,
+esse fluxo é a **fonte da verdade** do que aconteceu no sistema. A agregação centralizada
+(ELK, Loki, Datadog) não é opcional: sem ela, os logs de uma única operação distribuída
+ficam espalhados em dezenas de processos distintos, tornando o diagnóstico impraticável.
+
+**Princípio editorial:** mensagens de log devem usar linguagem direta e neutra, consistente
+com os nomes de domínio do sistema. Jargão informal, abreviações ambíguas ou termos que
+dependam de contexto não registrado tornam o log ilegível para quem não escreveu o código —
+exatamente as pessoas que o lerão em um incidente.
+
 | Camada | Versão SLF4J | Versão Quarkus 3.27 | Motivo da mudança |
 |---|---|---|---|
 | Logger | `LoggerFactory.getLogger()` | `@Inject Logger` via JBoss Logging | Logger injetado pelo CDI, otimizado para native image |
@@ -184,6 +196,51 @@ quarkus.micrometer.export.prometheus.enabled=true
 quarkus.arc.context-propagation.mdc=true
 ```
 
+### 4.1. Tabela de Níveis de Severidade
+
+A escolha do nível deve ser determinística — baseada no impacto sobre o estado do sistema,
+não em julgamento subjetivo:
+
+| Nível | Quando usar | Habilitado em produção? |
+|---|---|---|
+| `TRACE` | Diagnóstico de baixo nível: entradas/saídas de métodos, iterações, valores intermediários detalhados | Nunca — apenas em desenvolvimento local |
+| `DEBUG` | Fluxos internos, decisões condicionais, dados intermediários sem alteração de estado | Não por padrão — ativável por pacote sem reinicialização |
+| `INFO` | Operações que alteram estado: persistência, autenticação, chamadas externas | Sempre |
+| `WARN` | Situações anômalas recuperáveis: tentativas de acesso indevido, *fallbacks* ativados | Sempre |
+| `ERROR` | Falhas reais: exceção que impede o cumprimento do contrato da operação | Sempre |
+| `FATAL` | Falhas que tornam a aplicação incapaz de continuar — exigem intervenção imediata | Sempre |
+
+**Ativação dinâmica de DEBUG:** com `quarkus-logging-manager`, o nível pode ser alterado
+por pacote em tempo de execução via `/q/logging-manager` — sem reinicialização e sem afetar
+o volume global de logs.
+
+### 4.2. Requisito de Sincronização de Tempo (NTP + UTC)
+
+Em uma arquitetura de microsserviços, desvios de relógio entre servidores tornam a ordenação
+cronológica de eventos impossível, mesmo com logs em JSON. O timestamp de um evento em
+`pedidos-service` e o timestamp de um evento correlacionado em `pagamentos-service` devem
+ser comparáveis para que a reconstrução da sequência de causa e efeito funcione.
+
+**Requisito obrigatório de infraestrutura:** todos os servidores e containers que geram
+logs devem estar sincronizados ao **UTC** via **NTP**. Sem essa sincronização, o `traceId`
+correlaciona os logs pela identidade, mas não garante ordenação cronológica confiável entre
+serviços.
+
+A configuração do `quarkus.log.console.json=true` já garante que os timestamps sejam
+emitidos em UTC com precisão de milissegundos — o que é necessário mas não suficiente sem
+a sincronização NTP na infraestrutura.
+
+### 4.3. Transporte Seguro de Logs (SSL/TLS)
+
+Mascarar dados sensíveis na aplicação não é suficiente se o canal de transporte não estiver
+protegido. Logs transmitidos em texto claro entre o container e o coletor (Fluentd, Logstash,
+OTel Collector) podem expor dados de contexto não mascarados — como `userId`, `requestId`,
+`traceId` e nomes de entidades — a qualquer observador de rede.
+
+**Requisito:** o transporte de logs entre nós da rede deve usar **SSL/TLS**, garantindo
+confidencialidade e autenticidade do fluxo. Isso se aplica ao canal entre a aplicação e o
+coletor de logs, e entre o coletor e o backend de armazenamento (ELK, Loki, Datadog).
+
 ---
 
 ## 5. Código-Fonte
@@ -193,6 +250,13 @@ quarkus.arc.context-propagation.mdc=true
 Usa *pattern matching* com `switch` do Java 21 para categorizar o nível de
 mascaramento por tipo de dado, em vez de uma simples verificação booleana.
 Dados parcialmente identificáveis recebem tratamento diferente de credenciais.
+
+**Distinção entre mascaramento e redação:**
+
+- **Mascaramento:** o valor é substituído por uma representação que confirma presença sem expor o conteúdo (`"****"` para credenciais, `"[PROTEGIDO]"` para dados pessoais). Preserva a evidência de que o campo foi fornecido — útil para diagnóstico e conformidade.
+- **Redação:** o valor é completamente removido do registro — o campo não aparece no JSON. Indicado quando nem a confirmação de presença pode ser registrada (ex: dados sob sigilo legal, informações de menores). **Não implementado nesta versão — campos que exigem redação completa devem ser omitidos antes de chamar `.comDetalhe()`.**
+
+Em caso de dúvida sobre qual técnica aplicar, prefira a redação (omissão do campo).
 
 ```java
 package br.com.seudominio.log.context;
@@ -844,6 +908,24 @@ transversal, sem o `@Aspect` do Spring.
 A identidade do usuário é obtida via `SecurityContext` do JAX-RS, compatível
 com qualquer mecanismo de autenticação configurado no Quarkus (JWT, OIDC, Basic).
 
+**`requestId` vs. `traceId` — dois identificadores complementares:**
+
+O filtro atual popula `traceId` e `spanId` (via OpenTelemetry) e `userId`. Um segundo
+identificador — o `requestId` — é complementar e responde a uma pergunta diferente:
+
+| Identificador | Escopo | Gerado por | Pergunta que responde |
+|---|---|---|---|
+| `requestId` | Uma requisição HTTP em um único serviço | Filtro JAX-RS (a implementar) | "Todos os logs desta requisição neste processo" |
+| `traceId` | Toda a operação distribuída, em todos os serviços | OpenTelemetry SDK | "Todos os logs de todos os serviços para esta operação" |
+
+O `traceId` é indispensável para cruzar fronteiras de serviço. O `requestId` é útil para
+isolar o ciclo de vida de uma requisição dentro de um único processo — inclusive para
+correlacionar logs antes e depois de uma exceção no mesmo serviço, mesmo que o coletor
+ainda não tenha indexado o trace.
+
+> ⚠️ **Implementação futura:** a geração e propagação automática do `requestId` via
+> `X-Request-ID` header (ou geração interna) está planejada para uma versão futura do filtro.
+
 ```java
 package br.com.seudominio.log.filtro;
 
@@ -1183,6 +1265,51 @@ public void processar(Long pedidoId) {
 
 ---
 
+### Caso 2a — Código de erro único para integração com KEDB
+
+Eventos críticos de negócio e infraestrutura devem receber um código único e estável.
+Esse código é a chave de ligação entre o log em produção e a **Base de Conhecimento de
+Erros Conhecidos (KEDB)** — repositório interno que documenta causa raiz, impacto e
+procedimento de remediação para cada tipo de falha. Quando um operador vê `PAG-4022` em
+um alerta, consulta a KEDB e executa o procedimento documentado sem precisar interpretar
+a mensagem de log do zero.
+
+```java
+public void processar(Long pedidoId) {
+    try {
+        gateway.cobrar(pedidoId);
+    } catch (GatewayException e) {
+        LogSistematico
+            .registrando("Falha ao processar pagamento")
+            .em(PagamentoService.class, "processar")
+            .porque("Gateway recusou a transação")
+            .comDetalhe("errorCode",          "PAG-4022")   // ← chave KEDB
+            .comDetalhe("pedidoId",           pedidoId)
+            .comDetalhe("codigoErroGateway",  e.getCodigo())
+            .erro(e);
+
+        throw new PagamentoException("Pagamento não processado", e);
+    }
+}
+```
+
+**JSON gerado:**
+
+```json
+{
+  "level":                   "ERROR",
+  "message":                 "Falha ao processar pagamento",
+  "traceId":                 "4bf92f3577b34da6a3ce929d0e0e4736",
+  "userId":                  "joao.silva@empresa.com",
+  "log_motivo":              "Gateway recusou a transação",
+  "detalhe_errorCode":       "PAG-4022",
+  "detalhe_pedidoId":        "4821",
+  "detalhe_codigoErroGateway": "INSUFFICIENT_FUNDS"
+}
+```
+
+---
+
 ### Caso 3 — Dado sensível mascarado automaticamente
 
 ```java
@@ -1291,6 +1418,80 @@ Exportadores:
 Correlação: o traceId é a chave que une os três sinais na mesma requisição.
 ```
 
+**Aggregação centralizada como requisito arquitetural:** em uma arquitetura de microsserviços,
+cada instância de `pedidos-service`, `pagamentos-service` e `notificacoes-service` gera seu
+próprio fluxo de logs. Sem um ponto de agregação centralizado (ELK, Loki, Datadog), os logs
+de uma única operação distribuída ficam em processos distintos, sem possibilidade de correlação
+prática. O `traceId` injetado automaticamente pelo Quarkus é o identificador que torna essa
+correlação possível — mas ele só é útil se todos os fluxos convergirem para um mesmo sistema
+de consulta.
+
+### 7.1. Log de Auditoria — Padrão Distinto
+
+> Padrão de referência: Chris Richardson — [Audit Logging (microservices.io)](https://microservices.io/patterns/observability/audit-logging.html)
+
+O log de auditoria é um padrão **distinto e complementar** ao log de aplicação produzido
+pela DSL. Os dois coexistem e servem audiências diferentes:
+
+| Dimensão | Log de Aplicação (esta biblioteca) | Log de Auditoria |
+|---|---|---|
+| **Propósito** | Diagnóstico técnico, resposta a incidentes | Conformidade, responsabilização, disputas |
+| **Consumidor** | Engenheiros, SRE | Jurídico, segurança, suporte, reguladores |
+| **Retenção** | Dias a semanas | Meses a anos (LGPD, regulatórios) |
+| **Mutabilidade** | *Append-only* | Imutável e à prova de adulteração |
+| **Granularidade** | Eventos técnicos (erros, latência, fluxo) | Ações de negócio (quem alterou o quê, antes/depois) |
+
+**Campos obrigatórios de um registro de auditoria:**
+
+| Campo | Descrição |
+|---|---|
+| `actor_id` | Quem executou a ação (`userId` ou identidade de sistema) |
+| `actor_ip` | Endereço IP de origem |
+| `action` | Tipo: `CREATE`, `UPDATE`, `DELETE`, `READ` (sensível), `LOGIN`, `LOGOUT` |
+| `entity_type` | Tipo da entidade afetada (`Order`, `UserProfile`, `PaymentMethod`) |
+| `entity_id` | Identificador da entidade |
+| `state_before` | Estado relevante antes da ação |
+| `state_after` | Estado relevante após a ação |
+| `@timestamp` | UTC com precisão de milissegundos |
+| `trace_id` | Correlação com o trace distribuído |
+| `outcome` | `SUCCESS` ou `FAILURE` com motivo |
+
+**O que deve sempre gerar um registro de auditoria** (independente de já gerar log de aplicação):
+autenticação (`LOGIN`, `LOGIN_FAILED`, `LOGOUT`, `PASSWORD_CHANGED`), decisões de autorização
+(`ACCESS_DENIED` em recursos sensíveis), mutações em entidades sensíveis (Usuário, Pedido,
+Pagamento), ações administrativas e exportações de dados pessoais.
+
+> ⚠️ **Implementação futura:** o interceptor `@Auditable`, o `AuditWriter` e o pipeline de
+> persistência de auditoria estão planejados para uma versão futura da biblioteca.
+
+### 7.2. Rastreamento de Exceções — Padrão Distinto
+
+> Padrão de referência: Chris Richardson — [Exception Tracking (microservices.io)](https://microservices.io/patterns/observability/exception-tracking.html)
+
+Registrar uma exceção em log não é suficiente em sistemas com alto volume. Sem rastreamento
+centralizado, a mesma exceção pode ocorrer milhares de vezes antes que alguém perceba —
+o cenário de **degradação silenciosa**.
+
+O rastreamento de exceções é **complementar** ao log de aplicação. Uma exceção deve ser simultaneamente:
+
+1. **Registrada** no log estruturado — com contexto 5W1H completo, para correlação com a linha do tempo da requisição.
+2. **Reportada** a um serviço de rastreamento centralizado — para de-duplicação por *fingerprint*, atribuição de responsabilidade e acompanhamento de resolução.
+
+**Fingerprinting:** um *fingerprint* é um identificador estável para uma classe de exceções,
+calculado a partir do nome da classe da exceção e dos primeiros *stack frames* do código
+da aplicação (ignorando frames de frameworks). Isso garante que a 1.000ª ocorrência do mesmo
+bug seja reconhecida como o mesmo bug — não como 1.000 ocorrências distintas.
+
+**Pré-requisito de logging:** a qualidade do rastreamento depende inteiramente de receber
+o objeto de exceção completo. `e.getMessage()` descarta a classe (necessária para *fingerprinting*),
+o *stack trace* (necessário para localizar o bug) e a cadeia de causas (necessária para
+entender a raiz). Esse é o motivo da regra absoluta da seção 8 abaixo.
+
+> ⚠️ **Implementação futura:** o `ExceptionReporter` — CDI bean com integração a backends
+> como Sentry, Rollbar ou webhook — está planejado para uma versão futura da biblioteca.
+> As boas práticas de logging já implementadas (objeto completo, sem log-and-throw) são os
+> pré-requisitos que tornarão essa integração eficaz.
+
 ---
 
 ## 8. Não Conformidades e Checklist de Code Review
@@ -1303,18 +1504,21 @@ A lista completa de padrões proibidos, com exemplos de código, está na seçã
 |---|---|
 | `System.out.println` ou `System.err.println` | Sem nível, sem MDC, sem JSON |
 | Concatenação de strings ou `String.format` em mensagens | Campo não indexável, frágil a caracteres especiais |
-| `log.error(e.getMessage())` sem objeto completo | Descarta stack trace e cadeia de causas |
+| `log.error(e.getMessage())` sem objeto completo | Descarta stack trace e cadeia de causas — inviabiliza fingerprinting futuro |
 | Mensagens genéricas sem identificadores de entidade | Inúteis para diagnóstico em produção |
 | Log-and-throw sem contexto adicional | Duplicação de erro sem valor analítico |
+| Linguagem informal ou abreviações ambíguas em mensagens | Log ilegível para quem não escreveu o código — viola princípio editorial |
 | `Logger.getLogger()` com strings livres fora de `LogSistematico` | Viola a DSL — log sem estrutura 5W1H |
 | MDC manipulado fora de `GerenciadorContextoLog` | Risco de vazamento e campos inconsistentes |
 | `traceId` gerado como `UUID.randomUUID()` | Impossibilita correlação com Jaeger/Zipkin |
 | `MDC.clear()` fora do bloco `finally` do filtro ou interceptor | Vazamento de contexto em caso de exceção |
 | Dados sensíveis em `.comDetalhe()` com chave ausente no `SanitizadorDados` | Dado sensível registrado sem mascaramento — adicionar chave ao sanitizador |
+| Campo que exige redação total passado via `.comDetalhe()` | Usar mascaramento quando redação (omissão completa) seria obrigatória |
 | `@Logged` em beans sem `quarkus-smallrye-context-propagation` ativo | MDC e span OTel perdidos em pipelines reativos Mutiny |
 | Computação custosa sem guarda de nível | Overhead de serialização mesmo com nível desabilitado |
 | Eventos de negócio via `log.info()` genérico | Não identificáveis como categoria em ferramentas de observabilidade |
 | Falha de observabilidade (`MeterRegistry`, OTel exporter) relançada como exceção | Interrompe o fluxo de negócio por falha de infraestrutura |
+| Infraestrutura de log sem SSL/TLS no transporte | Dados de contexto expostos em trânsito mesmo com mascaramento na aplicação |
 
 ### Checklist de Code Review
 
@@ -1323,12 +1527,15 @@ A lista completa de padrões proibidos, com exemplos de código, está na seçã
 - [ ] Nenhum `log.error(e.getMessage())` — objeto de exceção completo passado
 - [ ] Nenhuma mensagem genérica — identificadores de entidade presentes
 - [ ] Nenhum log-and-throw sem contexto adicional
+- [ ] Mensagens usam linguagem direta, neutra e consistente com o domínio
 - [ ] Nenhum dado sensível (senhas, tokens, PAN, CPF) nos campos de log
+- [ ] Campos que exigem redação total omitidos antes de `.comDetalhe()` — não mascarados
 - [ ] Nenhum `UUID.randomUUID()` como `traceId` — contexto OpenTelemetry usado
 - [ ] MDC limpo no bloco `finally` via `GerenciadorContextoLog.limpar()`
 - [ ] Computações custosas protegidas por guarda de nível
 - [ ] Nomes de campos canônicos do [Registro de Nomes de Campos](FIELD_NAMES.md) usados
-- [ ] Eventos de negócio usam `structuredLogger.businessEvent()` — não `log.info()` genérico
+- [ ] Eventos críticos incluem `errorCode` para correlação com KEDB
+- [ ] Eventos de negócio usam campo `event_type` identificável — não `log.info()` genérico
 - [ ] Falhas de backend de observabilidade tratadas localmente — não relançadas
 - [ ] `quarkus-smallrye-context-propagation` presente em aplicações com pipelines Mutiny
 
@@ -1336,6 +1543,15 @@ A lista completa de padrões proibidos, com exemplos de código, está na seçã
 
 ## Ver Também
 
-- [Padrão de Logging em Aplicações Java](logging_revisado.md) — fundamentos, 5W1H, padrões de uso
-- [Implementação SLF4J + Log4j2](implementacao_slf4j.md) — biblioteca portável sem ArC
+**Documentos do projeto:**
+- [Padrão de Logging em Aplicações Java](logging_revisado.md) — fundamentos, 5W1H, padrões proibidos e obrigatórios
+- [Implementação SLF4J + Log4j2](implementacao_slf4j.md) — biblioteca portável para containers Jakarta EE
 - [Registro de Nomes de Campos](FIELD_NAMES.md) — nomes canônicos dos campos JSON
+
+**Referências bibliográficas:**
+- Chris Richardson — [Application Logging (microservices.io)](https://microservices.io/patterns/observability/application-logging.html)
+- Chris Richardson — [Distributed Tracing (microservices.io)](https://microservices.io/patterns/observability/distributed-tracing.html)
+- Chris Richardson — [Exception Tracking (microservices.io)](https://microservices.io/patterns/observability/exception-tracking.html)
+- Chris Richardson — [Audit Logging (microservices.io)](https://microservices.io/patterns/observability/audit-logging.html)
+- Iluwatar — [java-design-patterns: microservices-log-aggregation](https://github.com/iluwatar/java-design-patterns/tree/master/microservices-log-aggregation)
+- Iluwatar — [java-design-patterns: microservices-distributed-tracing](https://github.com/iluwatar/java-design-patterns/tree/master/microservices-distributed-tracing)
