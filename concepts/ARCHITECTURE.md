@@ -1,102 +1,167 @@
 # Visão Geral da Arquitetura
 
-> Este documento descreve a arquitetura conceitual e modular das bibliotecas de Logging Sistemático, suas responsabilidades e a forma como interagem.
+> Este documento descreve a arquitetura conceitual e modular das bibliotecas de Logging Sistemático, suas responsabilidades e a forma como interagem entre si e com a infraestrutura de observabilidade.
 
 ---
 
 ## Contexto do Sistema
 
-A biblioteca de Logging não é um processo separado (sidecar ou agente), mas uma dependência embarcada ativamente nas aplicações. Seu propósito é unificar o fornecimento do JSON estruturado via `stdout`, entregando a rastreabilidade necessária para o coletor de ambiente (Fluentd / OTel Collector).
+A biblioteca de Logging não é um processo separado (sidecar ou agente), mas uma dependência embarcada nas aplicações. Seu propósito é unificar a produção de JSON estruturado via `stdout`, entregando ao coletor de ambiente (Fluentd, OTel Collector, FluentBit) um fluxo de eventos com campos canônicos consistentes e contexto de correlação completo.
 
-```text
-┌─────────────────────────────────────────────────────┐
-│                   Serviço da Aplicação              │
-│                                                     │
-│  ┌──────────────┐     ┌─────────────────────────┐   │
-│  │ Lógica de    │────▶│    Logging Abstraction  │   │
-│  │ Negócio      │     │                         │   │
-│  └──────────────┘     │   LogSistematico (DSL)  │   │
-│                       │   GerenciadorContextoLog│   │
-│  ┌──────────────┐     │   SanitizadorDados      │   │
-│  │ Rest / Web   │────▶│                         │   │
-│  │ Endpoints    │     └────────────┬────────────┘   │
-│  └──────────────┘                  │                │
-└────────────────────────────────────┼────────────────┘
-                                     │
-              ┌──────────────────────┼──────────────────────┐
-              ▼                      ▼                      ▼
-     Log Aggregator           Tracing Backend        Metrics Backend
-  (Elasticsearch/Loki)     (Jaeger/Zipkin/OTLP)   (Prometheus/Grafana)
+A responsabilidade da biblioteca termina no `stdout`. O escoamento via rede, roteamento para backends de armazenamento e políticas de retenção são responsabilidade da infraestrutura — não da aplicação.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        Serviço da Aplicação                      │
+│                                                                  │
+│  ┌─────────────────┐     ┌──────────────────────────────────┐   │
+│  │  Lógica de      │────▶│        Camada de Logging         │   │
+│  │  Negócio        │     │                                  │   │
+│  └─────────────────┘     │  LogSistematico  (DSL pública)   │   │
+│                          │  @Logged         (interceptor)   │   │
+│  ┌─────────────────┐     │  GerenciadorContextoLog  (MDC)   │   │
+│  │  Endpoints      │────▶│  SanitizadorDados  (segurança)   │   │
+│  │  JAX-RS / HTTP  │     │                                  │   │
+│  └─────────────────┘     └─────────────────┬────────────────┘   │
+│                                            │ stdout (JSON)       │
+└────────────────────────────────────────────┼─────────────────────┘
+                                             │
+                              ┌──────────────▼──────────────┐
+                              │   Coletor de Ambiente        │
+                              │  (OTel Collector / Fluentd)  │
+                              └──────┬──────────────┬────────┘
+                                     │              │
+                     ┌───────────────▼──┐    ┌──────▼───────────────┐
+                     │  Log Aggregator  │    │  Tracing / Metrics    │
+                     │ (Elastic / Loki) │    │ (Jaeger / Prometheus) │
+                     └──────────────────┘    └──────────────────────┘
 ```
 
 ---
 
-## Arquitetura dos Módulos
+## Os Três Módulos
 
-A arquitetura do projeto possui duas frentes primárias de implementação para abarcar o escopo corporativo. O desenvolvimento de negócio não acessa frameworks diretos, mas apenas a DSL (`LogSistematico`, `@Logged`, `LogEtapas`).
+O projeto entrega três artefatos independentes sobre um único padrão conceitual. O código de negócio não acessa frameworks diretamente — acessa apenas a API pública da DSL (`LogSistematico`, `@Logged`), que é idêntica nos três módulos.
 
-### [Implementação SLF4J + Log4j2](Logs/implementacao_slf4j.md)
-**Código-fonte da biblioteca portável (Jakarta EE)**
+| Módulo | Tecnologia interna | Destino |
+|---|---|---|
+| `lib-logging-slf4j` | SLF4J 2.x + Log4j2 + CDI Jakarta EE | Wildfly, TomEE, Payara, OpenLiberty |
+| `lib-logging-quarkus` | JBoss Logging + ArC + OTel nativo | Quarkus 3.27, JVM ou native image GraalVM |
+| `quarkus-logging-extension` | Quarkus Extension (deployment + runtime) | Quarkus 3.27 com zero configuração manual |
 
-Destinada a contêineres imperativos tradicionais (Wildfly, TomEE, Payara). Utiliza o `LoggerFactory` padrão e gera o JSON via configuração de template do Log4j2 (`log4j2.xml` + `JsonTemplateLayout`).
-- **Contexto (MDC)**: Baseia-se no `org.slf4j.MDC` nativo associado a um `GerenciadorContextoLog` instanciado passivamente.
-- **Ativação**: O Interceptor (`LoggingInterceptor`) necessita de declaração compulsória do CDI dentro do `beans.xml` da aplicação cliente para que capture o tempo de execução e o fluxo do `Who` e `Where`.
-- **Rastreabilidade**: Integra a extração de OTel `traceId` capturando e limpando do `ThreadLocal` tradicional de forma segura através do bloco `finally`.
+### `lib-logging-slf4j` — Biblioteca portável Jakarta EE
 
-### [Implementação Quarkus 3.27](Logs/biblioteca_quarkus.md)
-**Código-fonte da biblioteca nativa Quarkus**
+Destinada a containers imperativos tradicionais. Gera JSON via `log4j2.xml` + `JsonTemplateLayout` do Log4j2.
 
-Construída para compilação estática em Native Image (GraalVM) e compatibilidade total com cenários reativos. Diferencia-se por não possuir overhead de *bridges* na geração do JSON.
-- **Contexto (MDC)**: Usa estritamente a aba nativa em `org.jboss.logging.MDC`.
-- **Reatividade Integrada**: Substitui a frágil gestão do ThreadLocal puro pela associação obrigatória ao `quarkus-smallrye-context-propagation`, atrelando contexto (OTel e MDC) à própria *Virtual Thread* ou pipeline reativo Mutiny do Vert.x.
-- **Ecossistema Embutido**: O JSON é acionado com simples `quarkus.log.console.json=true`, as rotinas de métrica ganham vida sob `quarkus-micrometer-registry-prometheus` e a auto-instrumentação baseada em OpenTelemetry cuida silenciosamente da propagação dos Cabeçalhos (*Headers*) em HTTP de saída e entrada.
+- **Logger:** `LoggerFactory.getLogger(classe)` — obtido internamente no momento da emissão; o desenvolvedor não instancia o logger.
+- **MDC:** `org.slf4j.MDC` — gerenciado exclusivamente pelo `GerenciadorContextoLog` (CDI bean `@ApplicationScoped`). Chamadas diretas a `MDC.put()` fora da biblioteca são uma não conformidade.
+- **Ativação do interceptor:** O `LoggingInterceptor` exige declaração explícita no `beans.xml` da aplicação cliente — o CDI Weld não descobre interceptores de JARs externos em silêncio. Sem essa entrada, o interceptor é ignorado sem erro.
+- **Rastreabilidade:** Extrai `traceId` e `spanId` do span OTel ativo via `Span.current().getSpanContext()`. Se não houver span ativo (ex: job agendado sem instrumentação), os campos de trace são omitidos — sem gerar valores inválidos.
+
+### `lib-logging-quarkus` — Biblioteca nativa Quarkus
+
+Construída para compilação nativa (GraalVM) e compatibilidade total com cenários reativos.
+
+- **Logger:** `Logger.getLogger(classe)` (JBoss Logging) — integração nativa com `quarkus-logging-json`, sem bridge de frameworks.
+- **MDC:** `org.jboss.logging.MDC` — gerenciado pelo `GerenciadorContextoLog` CDI bean `@ApplicationScoped`. O ArC descobre o `LogInterceptor` automaticamente via `@Interceptor` no classpath — sem `beans.xml`.
+- **Reatividade:** A troca de thread do Vert.x em pipelines Mutiny descarta silenciosamente o `ThreadLocal`. O `quarkus-smallrye-context-propagation` é obrigatório para garantir que MDC e span OTel sobrevivam à troca de thread — habilitado via `quarkus.arc.context-propagation.mdc=true`.
+- **JSON:** Ativado por uma linha no `application.properties` (`quarkus.log.console.json=true`). Todos os campos do MDC aparecem automaticamente como chaves de primeiro nível no JSON de saída.
+- **OTel:** Auto-instrumentação HTTP via `quarkus-opentelemetry` propaga o cabeçalho `traceparent` (W3C TraceContext) em chamadas de entrada e saída sem código manual.
+
+### `quarkus-logging-extension` — Extensão Quarkus
+
+Empacotada como extensão real com dois sub-artefatos Maven obrigatórios: `deployment` e `runtime`.
+
+- **`deployment`:** Executa em build-time. Registra beans no ArC, gera hints de reflexão e proxy para GraalVM native image, e define os valores padrão de configuração (evitando que o consumidor precise escrever `application.properties` manual).
+- **`runtime`:** É o JAR que vai no classpath da aplicação final. Expõe a mesma API pública da `lib-logging-quarkus` com zero configuração adicional.
+- **Dev UI:** Integração com o painel `/q/dev` do Quarkus para inspeção de contexto em tempo de desenvolvimento.
+
+A diferença fundamental em relação à biblioteca Quarkus é o split deployment/runtime: a biblioteca é um JAR comum descoberto em runtime; a extensão processa anotações e registra beans em build-time, resultando em startup mais rápido e native image sem configuração manual de reflexão.
 
 ---
 
-## Fluxo de Vida da Requisição (Data Flow)
+## Responsabilidades por Camada
 
-A rotina abaixo ilustra como os pacotes de contexto atuam estruturalmente na manutenção dos metadados nas implementações:
+| Camada | Componente | Responsabilidade |
+|---|---|---|
+| **API pública** | `LogSistematico` | Ponto de entrada da DSL; valida sequência de chamadas em tempo de compilação via `sealed interfaces` |
+| **API pública** | `@Logged` | Anotação CDI que ativa injeção automática de contexto e coleta de métricas de duração |
+| **Contexto** | `GerenciadorContextoLog` | Ciclo de vida do MDC: inicialização, registro de localização, limpeza garantida no `finally` |
+| **Contexto** | `LogContexto` | Snapshot imutável do contexto de correlação de uma requisição (`record` Java 21) |
+| **Modelo** | `LogEvento` | Modelo imutável 5W1H que transporta o evento do builder até o emissor (`record` Java 21) |
+| **Segurança** | `SanitizadorDados` | Mascaramento/redação automático por nome de chave antes de qualquer registro |
+| **Infraestrutura** | `LoggingInterceptor` / `LogInterceptor` | CDI `@AroundInvoke`: popula MDC com localização técnica e coleta métricas de duração via Micrometer |
+| **Infraestrutura** | Filtro HTTP | `ContainerRequestFilter`: inicializa e limpa o contexto de requisição no ciclo HTTP |
 
-```text
-1. Requisição chega (JAX-RS / Rota Reativa)
+---
+
+## Fluxo de Vida da Requisição
+
+O diagrama abaixo ilustra como os componentes atuam em sequência durante o processamento de uma requisição HTTP:
+
+```
+1. Requisição chega (JAX-RS / RESTEasy Reactive)
       │
       ▼
-2. Filtro (ContainerRequestFilter) e OTel
-   - OTel inicia span/trace.
-   - GerenciadorContextoLog inicializa MDC (userId, servico, traceId e spanId originais).
+2. Filtro HTTP (ContainerRequestFilter)
+   ├─ OTel inicia span e propaga traceId/spanId do cabeçalho traceparent
+   └─ GerenciadorContextoLog.inicializar(userId, servico)
+      Popula MDC: userId, servico, traceId, spanId
       │
       ▼
-3. Processamento e Regras
-   - Interceptors anotados (@Logged) repassam para o MDC temporariamente métricas e [classe, metodo].
-   - LogSistematico é acionado. SanitizadorDados oblitera senhas/P1.
-   - O MDC global se funde ao JSON final (stdout).
+3. Interceptor CDI (@Logged / @AroundInvoke)
+   ├─ GerenciadorContextoLog.registrarLocalizacao(classe, metodo)
+   │  Popula MDC: classe, metodo
+   └─ Timer.start() — cronômetro de duração iniciado
       │
       ▼
-4. Destruição do Contexto Funcional 
-   - Bloco Finally é acionado transversalmente.
-   - GerenciadorContextoLog.limpar() apaga o MDC preservando a ThreadPool limpa.
+4. Código de negócio
+   └─ LogSistematico.registrando(...)
+      ├─ SanitizadorDados mascara/redige campos sensíveis
+      ├─ Popula MDC com log_classe, log_metodo, log_motivo, log_canal, detalhe_*
+      ├─ Emite JSON para stdout (MDC + evento fundidos pelo formatador)
+      └─ Remove campos do evento do MDC no finally interno
+      │
+      ▼
+5. Retorno pelo interceptor (bloco finally)
+   ├─ Timer.stop() → métrica registrada no Micrometer
+   ├─ Counter de falha incrementado se houve exceção
+   └─ MDC.remove(classe, metodo) + GerenciadorContextoLog.limpar()
+      Remove todos os campos — thread devolvida ao pool limpa
+      │
+      ▼
+6. Retorno pelo filtro HTTP (fase de resposta)
+   └─ GerenciadorContextoLog.limpar() (segunda garantia para ambientes sem @Logged)
 ```
 
----
-
-## Futura Implementação
-
-### Módulo de Extensão Quarkus
-Visando simplificar radicalmente a instalação e eliminar declarações passivas (como CDI Interceptors fixos e reflexões baseadas no `@Logged` que demandam varredura no tempo de execução), há o projeto em potencial para portar a biblioteca Quarkus para um **Módulo de Extensão Quarkus (Quarkus Extension)** real.
-A extensão automatizaria a injeção em *Build-Time* do compilador Quarkus, registrando o `LogSistematico`, os interceptores de métricas e os componentes de Context Propagation em fases antecipadas do *Bytecode*, maximizando o desempenho final da imagem nativa.
+**Nota sobre jobs sem contexto HTTP:** quando `@Logged` é aplicado em beans acionados por scheduler ou mensageria, o filtro HTTP não é executado. O interceptor inicializa e limpa o MDC integralmente — esse comportamento é correto e intencional. O `traceId` e `spanId` só estarão presentes se o job estiver instrumentado com OTel.
 
 ---
 
-## Conceitos Não Aplicáveis ou Fora do Escopo do Projeto
+## Princípios Arquiteturais
 
-Parte da documentação histórica propunha abordagens monolíticas de observabilidade que hoje escapam da responsabilidade de uma biblioteca estrita de Logging (responsabilidade segregada aos frameworks Quarkus base). Abaixo destacam-se os temas reclassificados como **fora do escopo**:
+**Stdout como contrato de saída.** A biblioteca produz JSON estruturado para `stdout`. Roteamento para Elasticsearch, Loki, Datadog ou qualquer outro backend é responsabilidade do coletor de infraestrutura (OTel Collector, FluentBit, Fluentd) — não da aplicação.
 
-### 1. Separação em Módulos "OBSERVA4J-*" (Core, Tracing, Exceptions, Metrics, Audit)
-A arquitetura anterior idealizava uma coleção imensa sob o guarda-chuva de `observa4j` — contemplando repórteres de Exception (para o backend Sentry), Heath-checks customizados, auditores complexos e tracing independente.
-A nova realidade dita que **APENAS a injeção estruturada do JSON e do MDC via DSL (a biblioteca `logging-quarkus`) fazem parte do SDK**. Ferramentas como Prometheus, Jaeger/Tracing e Exception Backend já estão solucionados nativamente por extensões nativas do Quarkus sem que a nossa biblioteca seja o "Ator Principal" que os engole.
+**Falhas de observabilidade não interrompem o negócio.** Se o backend de tracing, o exportador OTel ou o `MeterRegistry` estiverem indisponíveis, a biblioteca registra a falha localmente e continua operando. A observabilidade nunca é motivo para falha de uma operação de negócio.
 
-### 2. Prefixos de Configuração Proprietários
-O desenho em que dezenas de propriedades eram marcadas como `observa4j.tracing.exporter`, `observa4j.exceptions.reporter` não é válido. A plataforma usa as configurações padronizadas de repositório da tecnologia Quarkus (ex: `quarkus.otel.exporter.otlp.endpoint`).
+**API pública isolada da implementação.** O código de negócio acessa apenas `LogSistematico` e `@Logged`. A escolha entre `lib-logging-slf4j` e `lib-logging-quarkus` é transparente para o desenvolvedor — a migração entre módulos não exige alteração no código de negócio.
 
-### 3. Integração Direta App-Logstash/GELF
-Os módulos do passado descreviam fluxos da própria aplicação disparar seus arquivos e logs direto para endpoints UDP do Graylog/Logstash. A arquitetura de implantação atual (Nuvem / Kubernetes / Container) orienta saídas de logging sempre para `STDOUT`. O escoamento via rede, TCP, ou drivers, é uma responsabilidade da Infraestrutura através de DaemonSets e coletores (OTel Collector Agent, FluentBit), **não da Aplicação/SDK.**
+**Imutabilidade dos objetos de valor.** `LogEvento`, `LogContexto` e `AuditRecord` são `records` Java 21. Imutabilidade garante thread-safety estrutural sem sincronização e elimina erros de estado compartilhado em ambientes concorrentes.
+
+**MDC como mecanismo de propagação.** O MDC é o único ponto de escrita de contexto. Chamadas diretas a `MDC.put()` fora do `GerenciadorContextoLog` constituem não conformidade — criam campos não canônicos e dificultam o rastreamento de vazamentos de contexto.
+
+---
+
+## Fora do Escopo
+
+### Prefixos de configuração proprietários
+
+Configurações como `observa4j.tracing.exporter` ou `observa4j.exceptions.reporter` não fazem parte do projeto. A plataforma usa as configurações padronizadas do ecossistema Quarkus (`quarkus.otel.exporter.otlp.endpoint`, `quarkus.log.console.json=true`).
+
+### Integração direta aplicação–Logstash/GELF
+
+A arquitetura de deployment em nuvem/Kubernetes orienta saídas de logging sempre para `stdout`. Transmitir logs diretamente via UDP para Graylog ou Logstash acopla a aplicação à infraestrutura de coleta e vai contra o modelo container-native. Esse escoamento é responsabilidade de DaemonSets e coletores externos.
+
+### Módulos de observabilidade além do logging
+
+Métricas (Prometheus), tracing (Jaeger/Zipkin) e exception tracking (Sentry) já são resolvidos pelas extensões nativas do Quarkus e pelo ecossistema OpenTelemetry. A biblioteca não é o ator principal desses pilares — ela produz os identificadores de correlação (`traceId`, `spanId`) que os unem, mas não os gerencia.

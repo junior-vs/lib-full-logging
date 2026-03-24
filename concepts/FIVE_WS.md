@@ -1,130 +1,216 @@
 # O Framework 5W1H
 
-> _"Quando você aplica o 5W1H, seus logs deixam de ser uma parede de texto e se tornam um banco de dados consultável."_
+> Quando o framework 5W1H é aplicado a cada evento de log, o arquivo de log deixa de ser uma parede de texto e passa a ser um banco de dados consultável. Em vez de `grep` no terminal, o engenheiro executa queries como: _"Mostre todos os erros (What) do usuário USR-445 (Who) nos últimos 10 minutos (When) no serviço de pagamentos (Where)."_
 
 ---
 
 ## Visão Geral
 
-O framework investigativo 5W1H (emprestado do jornalismo e adaptado para a engenharia de precisão) é o modelo fundacional de observabilidade neste projeto (`logging-quarkus`). Ele estabelece que toda entrada de log deve ser capaz de responder a seis dimensões para evitar que um log seja apenas "uma pista sem um caso":
+O framework 5W1H — emprestado do jornalismo e da Análise de Causa Raiz (RCA) — é o modelo fundacional deste projeto. Ele estabelece que todo evento de log deve responder a seis dimensões investigativas para ter valor diagnóstico real em produção.
 
-| Dimensão | Pergunta | Implementação via DSL | Exemplos de Campos Resultantes |
-| --- | --- | --- | --- |
-| **Who** (Quem) | Quem desencadeou a ação? | Injetado automaticamente | `userId`, `hostname`, IP |
+| Dimensão | Pergunta | Implementado via | Campos resultantes no JSON |
+|---|---|---|---|
+| **Who** (Quem) | Quem desencadeou a ação? | Injetado automaticamente | `userId` |
 | **What** (O quê) | O que exatamente ocorreu? | `.registrando("evento")` | `message`, `level` |
-| **When** (Quando) | Quando ocorreu a ação? | Injetado automaticamente | `timestamp` (UTC, ms precisão) |
-| **Where** (Onde) | Em que serviço e fluxo? | `.em(Classe.class, "metodo")` | `traceId`, `requestId`, `spanId` |
-| **Why** (Por quê) | Qual a motivação da ação? | `.porque("motivo de negócio")` | `log_motivo` |
-| **How** (Como) | Por qual canal/meio chegou? | `.como("canal")` | `log_canal` |
+| **When** (Quando) | Quando ocorreu? | Injetado automaticamente | `timestamp` (UTC, ms) |
+| **Where** (Onde) | Em que serviço, classe e fluxo? | `.em(Classe.class, "metodo")` + automático | `servico`, `log_classe`, `log_metodo`, `traceId`, `spanId`, `requestId` |
+| **Why** (Por quê) | Qual a motivação ou causa de negócio? | `.porque("motivo")` | `log_motivo` |
+| **How** (Como) | Por qual canal chegou? | `.como("canal")` | `log_canal` |
 
-Sem uma abordagem que englobe essas dimensões, os sistemas falham silenciosamente em produção.
+As dimensões *When* e *Who* são preenchidas automaticamente pela infraestrutura. A dimensão *Where* é parcialmente automática (identificadores de correlação via OTel e filtro HTTP) e parcialmente declarada (`.em()`). As dimensões *Why* e *How* exigem declaração explícita pelo desenvolvedor — e é exatamente aí que a DSL atua, guiando esse preenchimento.
+
+Um log com apenas `PedidoService.criar` sem o `pedidoId`, o usuário e o motivo não permite diagnóstico eficiente em produção. Classe e método são metadados técnicos úteis, mas não substituem rastreabilidade funcional.
 
 ---
 
 ## 1. Who — Identidade
 
-A dimensão _Who_ responde: **quem está envolvido neste evento e em qual máquina?**
+A dimensão *Who* responde: **quem está envolvido neste evento?**
 
-O preenchimento adequado distingue uma falha sistêmica sistêmica de um erro pontual isolado a um único cliente.
+O preenchimento adequado do *Who* distingue uma falha sistêmica que afeta todos os usuários de um erro pontual isolado a um único cliente. Em uma investigação pós-incidente, a ausência do `userId` transforma horas de diagnóstico em varredura cega.
 
-### Identidade do Usuário
-Capturado automaticamente pela aplicação (`GerenciadorContextoLog`), evita o repasse explícito em cada etapa:
+### Identidade do usuário
+
+Capturado automaticamente pelo `GerenciadorContextoLog` a partir do `SecurityContext` CDI, sem necessidade de repasse explícito em cada camada de negócio:
+
 ```json
 {
-  "userId": "usr_99812A"
+  "userId": "joao.silva@empresa.com"
 }
 ```
 
-### Identidade da Infraestrutura
-Em arquiteturas distribuídas e nuvens baseadas em microserviços, o _Who_ também compreende o nó operacional:
+Quando não há usuário autenticado (chamadas de sistema, jobs agendados), o campo recebe o valor `"anonimo"` — nunca é omitido nem preenchido com `null`. Isso garante que queries como `userId: "anonimo"` isolem operações de sistema de operações de usuário.
+
+### Identidade do serviço
+
+Em arquiteturas de microsserviços, o *Who* inclui também o serviço que gerou o evento. O campo `servico` é preenchido automaticamente a partir de `quarkus.application.name` (Quarkus) ou da configuração equivalente no container Jakarta EE:
+
 ```json
 {
-  "hostname": "k8s-pod-auth-b7d8",
-  "pid": 1
+  "servico": "pedidos-service"
 }
 ```
+
+Esse campo é essencial para queries que cruzam logs de múltiplos serviços em um único agregador. Sem ele, não é possível distinguir qual instância de qual serviço gerou um determinado evento.
 
 ---
 
 ## 2. What — Descrição do Evento
 
-Responde a: **o que especificamente aconteceu?**
+A dimensão *What* responde: **o que exatamente aconteceu?**
 
-Textos vagos são os maiores inimigos da recuperação acelerada (MTTR). Logs em texto estáticos ocultam os identificadores da entidade tratada.
+É a dimensão mais visível do log — é o `message` que aparece em primeiro lugar no Kibana ou no Grafana Loki. Mensagens vagas são os maiores inimigos do MTTR: `"Erro no processamento"` pode corresponder a centenas de eventos distintos sem nenhuma pista sobre o que falhou.
 
-**O que evitar:** `log.error("Erro no processamento");`
-**A Abordagem Correta (via pacote `log/dsl`):**
+### Regras para mensagens
+
+- **Usar linguagem direta e neutra.** Descrever o evento como uma frase factual, no passado: "Pedido criado", "Login falhou", "Pagamento recusado". Evitar linguagem informal, jargão interno e abreviações ambíguas.
+- **Incluir o identificador da entidade quando possível.** "Falha ao salvar Order#4821" é diagnosticável; "Falha ao salvar" não é.
+- **Não duplicar informações já em campos estruturados.** Se `pedidoId` está em `comDetalhe()`, não é necessário repetir na mensagem.
+
 ```java
+// PROIBIDO — vago, sem contexto de entidade
+LogSistematico.registrando("Erro no processamento")...
+
+// CORRETO — específico, incluindo o identificador
 LogSistematico
-    .registrando("Falha durante liquidação de nota") // ← What
-    // ...
+    .registrando("Falha ao processar pagamento")
+    .em(PagamentoService.class, "processar")
+    .comDetalhe("pedidoId", pedidoId)
+    .erro(e);
 ```
 
-A ação também abarca eventos de uso e negócio (ex: `ORDER_COMPLETED`), garantindo uma visão holística entre incidentes e fluxo de comportamento. E, finalmente, inclui a integridade estrutural da entidade em si (como as exceções não suprimidas passadas em `.erro(log, e)`).
+### Eventos técnicos vs. eventos de negócio
+
+O *What* abrange dois tipos de eventos:
+
+- **Eventos técnicos:** falhas de integração, exceções, estados de fluxo interno. Destinados a engenheiros e SRE.
+- **Eventos de negócio:** `ORDER_COMPLETED`, `CHECKOUT_STARTED`, `PAYMENT_FAILED`. Destinados também a times de negócio e analytics. Devem incluir o campo `eventType` via `comDetalhe()` para serem identificáveis como categoria distinta nas ferramentas de observabilidade.
 
 ---
 
 ## 3. When — A Linha do Tempo
 
-Responde a: **exatamente quando este evento tomou forma?**
+A dimensão *When* responde: **exatamente quando este evento ocorreu?**
 
-Regras cruciais:
-- **Precisão de milissegundos:** Eventos distribuídos concorrentes não podem ser enfileirados apenas em segundos.
-- **Fuso horário UTC:** Fusos horários relativos distorcem investigações multi-regionais de rastreamento de causa e efeito.
+Em sistemas distribuídos, a dimensão *When* é mais complexa do que parece. Um timestamp sozinho não é suficiente — ele precisa ser comparável com timestamps de outros serviços para que a reconstrução da sequência de causa e efeito funcione.
 
-O container Quarkus e o wrapper de JSON (`quarkus-logging-json`) realizam a inserção deste campo (`@timestamp`) passivamente mediante sincronizada injeção do OpenTelemetry. É um requisito subjacente que os servidores possuam relógios sincronizados via protocolo NTP (Network Time Protocol).
+### Requisitos obrigatórios
+
+**Precisão de milissegundos.** Eventos distribuídos concorrentes não podem ser enfileirados com precisão de segundos. Dois eventos no mesmo segundo em serviços diferentes não têm ordem determinável sem milissegundos.
+
+**UTC obrigatório.** Timestamps em fuso horário local distorcem investigações em sistemas multi-regionais ou em equipes distribuídas. O formato `2026-03-11T21:55:00.123Z` é inequívoco; `2026-03-11T18:55:00.123-03:00` exige conversão mental a cada comparação.
+
+**Sincronização NTP.** O `quarkus-logging-json` e o `JsonTemplateLayout` do Log4j2 emitem timestamps em UTC — mas isso é necessário, não suficiente. Se os relógios das máquinas que executam os serviços estiverem dessincronizados, os timestamps em UTC serão incorretos mesmo que bem formatados. Todos os servidores e containers devem estar sincronizados via NTP.
+
+O campo `timestamp` é preenchido automaticamente pelo formatador no momento da emissão — o desenvolvedor não declara este campo.
 
 ---
 
 ## 4. Where — Topologia e Localização
 
-A dimensão _Where_ revela: **onde na cadeia lógica do código e na malha da infraestrutura esse evento surgiu?**
+A dimensão *Where* revela: **onde na cadeia lógica do código e na malha da infraestrutura este evento surgiu?**
 
-Essa resposta cruza múltiplas escalas de abstração:
+Essa resposta opera em três escalas complementares:
 
-### Na Origem Concreta do Código
-Sustentado via `.em(MinhaClasse.class, "meuMetodo_xyz")`, previne elucidações estúpidas e demoradas rastreando fluxos de classe por inspeção textual. E quando uma `Exception` se eleva, a própria trilha (*stacktrace*) e causas base entram no invólucro para determinar as dependências culposas.
+### Localização técnica no código
 
-### Na Vida Útil da Interação (Traces e IDs)
-Em sistemas concorrentes que roteiam paralelamente solicitações no mesmo contêiner:
+Sustentado via `.em(MinhaClasse.class, "meuMetodo")`, registra a origem precisa do evento no código. Isso evita a necessidade de interpretar stack traces completos para encontrar a linha relevante em eventos não excepcionais.
+
+```java
+LogSistematico
+    .registrando("Pedido criado")
+    .em(PedidoService.class, "criar")  // ← Where técnico
+    ...
+```
+
+Quando há uma exceção, o stack trace completo é serializado automaticamente pelo formatador — fornecendo o *Where* com máxima granularidade.
+
+### Identificadores de correlação
+
+Em sistemas que processam múltiplas requisições concorrentemente, os identificadores de correlação são o que separa os eventos de uma requisição específica dos eventos de todas as outras:
+
 ```json
-{ 
-  "requestId": "a3f9c2d1...",
-  "traceId": "7d2c8e4f1a3b9c2d4bf92f3577b34da6",
-  "spanId": "a3ce929d0e0e4736"
+{
+  "requestId": "a3f9c2d1-7b44-4e2a-9c2d-1a3b9c2d17b4",
+  "traceId":   "4bf92f3577b34da6a3ce929d0e0e4736",
+  "spanId":    "a3ce929d0e0e4736"
 }
 ```
-Isolando os marcadores via **OpenTelemetry** combinados ao Servlet Filter para solicitações isoladas, rastreamos todas as passagens da rota lógica do _Where_.
+
+O `requestId` isola uma única requisição HTTP dentro de um serviço. O `traceId` — gerado pelo OpenTelemetry e propagado via cabeçalho `traceparent` (W3C TraceContext) — une os eventos de todos os serviços que participaram da mesma operação distribuída. Filtrar por `traceId` em um agregador de logs reconstrói a jornada completa do usuário através de N serviços, em ordem cronológica, com um único filtro.
+
+### Identidade do serviço
+
+O campo `servico` informa em qual microsserviço o evento ocorreu — essencial em um agregador que consolida logs de dezenas de serviços. Junto com o `traceId`, permite navegar de um evento em `pedidos-service` para o evento correlacionado em `pagamentos-service` sem ambiguidade.
 
 ---
 
-## 5. Why e How — Motivação e Canal
+## 5. Why — Motivação de Negócio
 
-Essas são as narrativas emergentes que justificam o registro de um estado mutável e indicam a procedência arquitetural. Elas diferem a arquitetura madura da superficial:
+A dimensão *Why* responde: **qual a causa ou motivação de negócio deste evento?**
 
-Ao declarar o log com `.porque("...")`, os operadores e o corpo diretivo entendem qual o processo negocial motivou a chamada sem recorrer à varredura complexa de DB, enquanto com `.como("...")` rastreiam a via de entrada lógica (Filas mensageiras, rotas REST, processamentos de Lote cron).
+Essa dimensão diferencia uma arquitetura de logging madura de uma superficial. O *Why* é o que permite que um operador de plantão entenda o contexto de um evento sem precisar ler o código-fonte ou consultar o desenvolvedor que o escreveu.
+
+```java
+LogSistematico
+    .registrando("Pagamento recusado")
+    .em(PagamentoService.class, "processar")
+    .porque("Gateway recusou a transação — saldo insuficiente")  // ← Why
+    ...
+```
+
+O `.porque()` deve expressar a causa em termos de domínio de negócio — não em termos técnicos. "Gateway recusou a transação — saldo insuficiente" é um *Why* útil. "IOException ao chamar o gateway" é um *What* disfarçado de *Why*.
 
 ---
 
-## 6. Além da Correção de Erros (Debugging)
+## 6. How — Canal de Origem
 
-Um registro com conformidade rígida dos preceitos do 5W1H destranca casos de usos como:
+A dimensão *How* responde: **por qual canal ou mecanismo este evento chegou ao sistema?**
 
-- **Estatísticas em Tempo Real e KPIs (Analytics)**: Identificação ágil de taxas de abandono atrelando tipos de transação às regiões do locatário (Tenants).
-- **Trilha Auditável e Probatória (Conformidade)**: Aferição precisa perante auditoria jurídica do rastreio de um repasse mal sucedido a um GateWay de parceiro externo via Timestamp idêntico e Carga original (Payload).
-- **Mitigação Ativa via Anomalias (Alerting)**: Detectores ML observam anomalias abruptas em picos sem precedentes por exemplo do status `LOGIN_FAILED` para mitigar ataques Brute-Force.
+O *How* é o contexto arquitetural do evento — informa se a ação foi disparada por uma requisição HTTP síncrona, uma mensagem de fila assíncrona, um job agendado ou uma chamada interna. Essa informação é valiosa para distinguir comportamentos esperados de comportamentos anômalos: um `LOGIN_FAILED` via API REST pode ser tentativa de força bruta; o mesmo evento via job de migração é esperado.
+
+```java
+LogSistematico
+    .registrando("Nota fiscal processada")
+    .em(NotaFiscalService.class, "processar")
+    .como("Job assíncrono — scheduler diário 02:00 UTC")  // ← How
+    ...
+```
 
 ---
 
-## Conceitos Fora do Escopo do Projeto
+## 7. Além do Debugging
 
-A listagem a seguir isola alusões históricas da documentação técnica primária que não se inserem mais no *guideline* de produção deste repositório da Studio Observability.
+Um registro com conformidade rigorosa ao 5W1H destranca casos de uso que vão muito além do diagnóstico de erros:
 
-### 1. Nomenclatura "OBSERVA4J"
-Iterações anteriores desta documentação referiam-se a uma sigla de pacote ou framework chamado "OBSERVA4J". Esta conotação não se aplica, visto que a arquitetura corporativa está consolidada unicamente em torno dos submódulos do `logging-quarkus`.
+### Analytics em tempo real
 
-### 2. Injeção de Contexto por CDI `@RequestScoped ObservabilityContext`
-Práticas descritas sugeriam que a dimensão do `Who` e `Where` seria garantida pela injeção manual de um escopo JAX-RS anotado mediante `@RequestScoped ObservabilityContext`. Embora correta para ecossistemas legados, essa estrutura foi suprimida e trocada definitivamente por `LogContexto` e a orquestração via ThreadLocal subjacente operada por `GerenciadorContextoLog` nativamente via filtro de Quarkus e propagações do OpenTelemetry.
+Eventos como `ORDER_COMPLETED` com `valorTotal`, `currency` e `userId` alimentam dashboards de KPIs diretamente no Kibana ou Grafana, sem a necessidade de um banco de dados de analytics separado ou um SDK de terceiros. O log estruturado é o pipeline de analytics.
 
-### 3. Log de Workers por "Queue / Background Jobs" Mapeados Automaticamente
-Modelos prévios forçavam a dependência intrínseca de variáveis como `queue_name` ou `worker_class` como pilares essenciais no formato JSON de background. Considerando os módulos correntes assíncronos via SmallRye Context Propagation, as injeções de informações secundárias ocorrem via DSL de rastreio genérico (`LogSistematico.comDetalhe()`), evitando prender formalmente instâncias do core a metadados específicos de agendadores isolados (tipo Quartz ou RabbitMQ).
+### Conformidade regulatória (LGPD)
+
+A trilha de auditoria construída sobre eventos 5W1H responde exatamente às perguntas exigidas por uma investigação regulatória: quem acessou (Who), quais dados (What), quando (When), de qual sistema (Where), por qual justificativa (Why) e por qual canal (How). Isso transforma o log de ferramenta de diagnóstico em evidência probatória.
+
+### Detecção proativa de anomalias
+
+A consistência estrutural do 5W1H habilita alertas baseados em padrão: um pico de `LOGIN_FAILED` do mesmo `userId` em curto intervalo sinaliza tentativa de força bruta; uma queda de 80% em `ORDER_COMPLETED` em relação à baseline sinaliza falha silenciosa no frontend; qualquer evento com `errorCode: "PAG-4022"` acima de um threshold dispara notificação no canal de plantão. Sem estrutura consistente, esses alertas não são possíveis.
+
+### Resolução de disputas técnicas
+
+O payload e a resposta de uma chamada a um gateway externo, registrados como eventos 5W1H com `traceId` e timestamp, constituem evidência técnica irrefutável para encerrar disputas sobre o que foi enviado, quando foi enviado e qual foi a resposta — sem depender de logs do sistema do parceiro.
+
+---
+
+## Fora do Escopo
+
+### `hostname` e `pid` como campos do *Who*
+
+Documentos anteriores incluíam `hostname` e `pid` como campos obrigatórios da dimensão *Who*. Em arquiteturas container-native (Kubernetes, Docker), o `hostname` é o nome do pod — um identificador efêmero que muda a cada restart e não tem valor diagnóstico estável. O `servico` (nome da aplicação) é o identificador de identidade relevante; a infra-estrutura de orquestração gerencia o mapeamento pod-serviço.
+
+### `@RequestScoped ObservabilityContext` como portador do *Who* e *Where*
+
+Documentação anterior sugeria injetar um bean `@RequestScoped` chamado `ObservabilityContext` para carregar as dimensões *Who* e *Where*. O projeto usa `GerenciadorContextoLog` (`@ApplicationScoped`) + MDC como mecanismo de propagação. O MDC é o padrão do ecossistema SLF4J/JBoss Logging para propagação thread-local de contexto de diagnóstico — criar um bean de escopo de requisição paralelo seria redundante e criaria dois mecanismos de propagação para a mesma informação.
+
+### Campos fixos obrigatórios para jobs por `queue_name` ou `worker_class`
+
+Documentação anterior forçava campos como `queue_name` e `worker_class` como obrigatórios no JSON de jobs assíncronos. O projeto não pré-define campos específicos para tipos de executor. O contexto de jobs é declarado via `.como("canal")` e `.comDetalhe()` da DSL, sem acoplar o core da biblioteca a metadados de schedulers específicos.
