@@ -8,6 +8,6 @@
   <name>studio-observability</name>
 
   <modules>
-    <module>logging-quarkus</module>
+    <module>lib-logging-quarkus</module>
   </modules>
 </project>

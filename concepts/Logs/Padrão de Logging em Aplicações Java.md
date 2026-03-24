@@ -849,19 +849,44 @@ Logs sistemáticos não são overhead — são a memória do sistema.
 
 ---
 
-## Ver Também
+## Referências
 
 **Implementações da biblioteca:**
 - [Implementação SLF4J + Log4j2](implementacao_slf4j.md) — código-fonte completo da biblioteca portável
 - [Implementação Quarkus 3.27](biblioteca_quarkus.md) — código-fonte completo da biblioteca nativa Quarkus
 - [Registro de Nomes de Campos](FIELD_NAMES.md) — nomes canônicos dos campos JSON
 
-**Referências bibliográficas:**
-- Anton Chuvakin — *Security Information and Event Management* — categorização de eventos críticos de segurança
+**Fundamentos deste padrão:**
 - Microsoft Research (2010) — *Characterizing Logging Practices in Open-Source Software* — estudo empírico sobre padrões de inserção de logs
-- Chris Richardson — [Application Logging (microservices.io)](https://microservices.io/patterns/observability/application-logging.html)
-- Chris Richardson — [Distributed Tracing (microservices.io)](https://microservices.io/patterns/observability/distributed-tracing.html)
-- Chris Richardson — [Exception Tracking (microservices.io)](https://microservices.io/patterns/observability/exception-tracking.html)
-- Chris Richardson — [Audit Logging (microservices.io)](https://microservices.io/patterns/observability/audit-logging.html)
+- Anton Chuvakin — *Security Information and Event Management* — categorização de eventos críticos de segurança
+- Chris Richardson — [Application Logging](https://microservices.io/patterns/observability/application-logging.html) — microservices.io
+- Chris Richardson — [Distributed Tracing](https://microservices.io/patterns/observability/distributed-tracing.html) — microservices.io
+- Chris Richardson — [Exception Tracking](https://microservices.io/patterns/observability/exception-tracking.html) — microservices.io
+- Chris Richardson — [Audit Logging](https://microservices.io/patterns/observability/audit-logging.html) — microservices.io
 - Iluwatar — [java-design-patterns: microservices-log-aggregation](https://github.com/iluwatar/java-design-patterns/tree/master/microservices-log-aggregation)
 - Iluwatar — [java-design-patterns: microservices-distributed-tracing](https://github.com/iluwatar/java-design-patterns/tree/master/microservices-distributed-tracing)
+
+**Observabilidade e SRE:**
+- [OpenTelemetry Specification](https://opentelemetry.io/docs/specs/)
+- [W3C TraceContext Recommendation](https://www.w3.org/TR/trace-context/)
+- [Quarkus 3.x — OpenTelemetry Guide](https://quarkus.io/guides/opentelemetry)
+- [Elasticsearch Common Schema (ECS)](https://www.elastic.co/guide/en/ecs/current/)
+- [Google SRE Book — Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/) — capítulo fundacional sobre alertas baseados em sintomas
+- [Dapper — Large-Scale Distributed Systems Tracing](https://research.google/pubs/pub36356/) — paper seminal do Google sobre tracing distribuído
+- Cindy Sridharan — [Monitoring and Observability](https://copyconstruct.medium.com/monitoring-and-observability-8417d1952e1c) — distinção entre monitoramento e observabilidade
+
+**Livros:**
+- Charity Majors, Liz Fong-Jones, George Miranda — *Observability Engineering* (O'Reilly, 2022) — observabilidade moderna e debugging por alta cardinalidade
+- Betsy Beyer, Chris Jones et al. — *Site Reliability Engineering* (Google, 2016) — práticas SRE, especialmente os capítulos de monitoramento e alertas
+- Cindy Sridharan — *Distributed Systems Observability* (O'Reilly, 2018) — guia conciso dos três pilares
+- James Turnbull — *The Art of Monitoring* (O'Reilly, 2018) — guia prático de infraestrutura de monitoramento
+
+**Ferramentas:**
+- [Prometheus](https://prometheus.io/) — coleta de métricas e alertas
+- [Grafana](https://grafana.com/) — dashboards e visualização
+- [Grafana Loki](https://grafana.com/oss/loki/) — armazenamento e consulta de logs
+- [Elasticsearch + Kibana (ELK)](https://www.elastic.co/) — indexação e busca de logs estruturados
+- [Jaeger](https://www.jaegertracing.io/) — backend de tracing distribuído open-source
+- [Grafana Tempo](https://grafana.com/oss/tempo/) — armazenamento de traces escalável e de baixo custo
+- [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) — pipeline de telemetria agnóstico de vendor
+- [Datadog](https://www.datadoghq.com/) — plataforma de observabilidade gerenciada
