@@ -29,7 +29,7 @@ quarkus.log.console.format=json
 
 ## O Framework 5W1H e Consistência de Campos
 
-A adoção do logging estruturado pressupõe obediência ao modelo 5W1H (Who, What, When, Where, Why, How). O objetivo é garantir que cada entrada traga contexto máximo investigativo. Nomeclaturas devem sempre usar canonical snake_case.
+A adoção do logging estruturado pressupõe obediência ao modelo 5W1H (Who, What, When, Where, Why, How). O objetivo é garantir que cada entrada traga contexto máximo investigativo. As nomenclaturas de campos seguem a convenção nativa da plataforma (camelCase para identificadores como `userId`, `traceId`; prefixo `log_` para campos da DSL; prefixo `detalhe_` para campos de negócio).
 
 Todo log deve responder, implícita ou explicitamente:
 - **Who:** Identificador do ator (ex. `userId`)
@@ -75,9 +75,22 @@ A estrutura delega o preenchimento da dimensão *Where* (Contexto) ao `Gerenciad
 ### Sensibilidade de Dados e Mascaramento
 Sob qualquer circunstância (LGPD/GDPR), dados sensíveis (Pass, Tokens, CC, CPF) devem ser retidos ou encobertos. A estrutura apoia o comportamento usando `SanitizadorDados.sanitizar(chave, valor)`, comissionado transversalmente de forma passiva para reescrever ocorrências de `****` e mascarar ameaças latentes.
 
-### Padrões de Severidade e Anti-Padrões
-- **Evitar o Log-and-Throw (*Double Logging*):** Registre sua exceção localmente (adicionando mais preâmbulos) OU repasse, mas jamais os dois com o mesmo traço sem justificativa arquitetural.
+### Gestão de Níveis de Severidade
+A escolha do nível de log deve ser determinística, não subjetiva:
+
+| Nível | Quando usar | Em produção? |
+|---|---|---|
+| `TRACE` | Diagnóstico de baixo nível (entradas/saídas de métodos) | Nunca |
+| `DEBUG` | Fluxos internos, decisões condicionais | Não por padrão — ativável dinamicamente por pacote |
+| `INFO` | Operações que alteram estado (persistência, autenticação, chamadas externas) | Sempre |
+| `WARN` | Situações anômalas recuperáveis (*fallbacks*, validações rejeitadas) | Sempre |
+| `ERROR` | Falhas reais que impedem o cumprimento do contrato da operação | Sempre |
+| `FATAL` | Falhas que tornam a aplicação incapaz de continuar | Sempre |
+
+### Anti-Padrões Obrigatórios
+- **Evitar o Log-and-Throw (*Double Logging*):** Registre sua exceção localmente OU repasse, mas jamais os dois sem agregar contexto adicional.
 - **Trace Integridade Integral:** Ao invocar instâncias como `.erro(log, excecao)`, repasse todo o objeto e não omita partes através de `ex.getMessage()`. Identificar o traço (stacktrace) consolidado no JSON é essencial.
+- **Guarda de Nível para Computações Custosas:** Proteja serializações pesadas com `if (log.isDebugEnabled())` para evitar overhead com nível desabilitado em produção.
 
 ---
 

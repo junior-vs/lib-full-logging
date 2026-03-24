@@ -12,7 +12,7 @@ O framework investigativo 5W1H (emprestado do jornalismo e adaptado para a engen
 | --- | --- | --- | --- |
 | **Who** (Quem) | Quem desencadeou a ação? | Injetado automaticamente | `userId`, `hostname`, IP |
 | **What** (O quê) | O que exatamente ocorreu? | `.registrando("evento")` | `message`, `level` |
-| **When** (Quando) | Quando ocorreu a ação? | Injetado automaticamente | `@timestamp` (UTC, ms precisão) |
+| **When** (Quando) | Quando ocorreu a ação? | Injetado automaticamente | `timestamp` (UTC, ms precisão) |
 | **Where** (Onde) | Em que serviço e fluxo? | `.em(Classe.class, "metodo")` | `traceId`, `requestId`, `spanId` |
 | **Why** (Por quê) | Qual a motivação da ação? | `.porque("motivo de negócio")` | `log_motivo` |
 | **How** (Como) | Por qual canal/meio chegou? | `.como("canal")` | `log_canal` |

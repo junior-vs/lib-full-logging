@@ -102,14 +102,43 @@ try {
 }
 ```
 
+### 2.8. Computação Custosa sem Guarda de Nível
+Serializações pesadas (ex: converter objetos inteiros para JSON) devem ser protegidas por verificação prévia do nível ativo para evitar overhead em produção.
+```java
+// PROIBIDO — serializa o objeto mesmo com DEBUG desabilitado
+log.debug("Estado do pedido: {}", objectMapper.writeValueAsString(pedido));
+
+// CORRETO — custo pago apenas se o nível estiver habilitado
+if (log.isDebugEnabled()) {
+    log.debug("Estado do pedido: {}", objectMapper.writeValueAsString(pedido));
+}
+```
+
 ---
 
-## 3. Padrões Obrigatórios
+## 3. Gestão de Níveis de Severidade
+
+A escolha do nível de log deve ser determinística, não subjetiva:
+
+| Nível | Quando usar | Em produção? |
+|---|---|---|
+| `TRACE` | Diagnóstico de baixo nível (entradas/saídas de métodos, iterações) | Nunca — apenas local |
+| `DEBUG` | Fluxos internos, decisões condicionais, dados intermediários | Não por padrão — ativável dinamicamente |
+| `INFO` | Operações que alteram estado: persistência, autenticação, chamadas externas | Sempre |
+| `WARN` | Situações anômalas recuperáveis: *fallbacks*, validações rejeitadas | Sempre |
+| `ERROR` | Falhas reais que impedem o cumprimento do contrato da operação | Sempre |
+| `FATAL` | Falhas que tornam a aplicação incapaz de continuar operando | Sempre |
+
+---
+
+## 4. Padrões Obrigatórios
 
 1. **Abordagem Orientada a Objeto Imutável**:
    Ao arquitetar fluxos de log e dados subjacentes, todos os artefatos base da biblioteca transitam passivamente via `record` intocável (`LogContexto`, `LogEvento`).
 2. **Máscara de Dados**:
    Sensibilidade (`SanitizadorDados`) assume a vanguarda e omite automaticamente informações regulatórias caso um programador inexperiente faça `LogSistematico.comDetalhe("cpf", valor);`. Sempre valide os *sets* internos de mascaramento quando integrar frentes de segurança novas (PCI/DSS/LGPD).
+3. **Falhas Silenciosas na Infraestrutura de Observabilidade**:
+   Falhas de backends de observabilidade (OTel, Sentry, métricas) **nunca devem propagar como exceções de negócio**. Registre a falha localmente e continue a execução do sistema.
 
 ---
 
