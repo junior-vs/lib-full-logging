@@ -13,11 +13,11 @@ O framework 5W1H — emprestado do jornalismo e da Análise de Causa Raiz (RCA) 
 | **Who** (Quem) | Quem desencadeou a ação? | Injetado automaticamente | `userId` |
 | **What** (O quê) | O que exatamente ocorreu? | `.registrando("evento")` | `message`, `level` |
 | **When** (Quando) | Quando ocorreu? | Injetado automaticamente | `timestamp` (UTC, ms) |
-| **Where** (Onde) | Em que serviço, classe e fluxo? | `.em(Classe.class, "metodo")` + automático | `servico`, `log_classe`, `log_metodo`, `traceId`, `spanId`, `requestId` |
+| **Where** (Onde) | Em que serviço, classe e fluxo? | `.em(Classe.class, "metodo")` + automático | `servico`, `log_classe`, `log_metodo`, `traceId`, `spanId` |
 | **Why** (Por quê) | Qual a motivação ou causa de negócio? | `.porque("motivo")` | `log_motivo` |
 | **How** (Como) | Por qual canal chegou? | `.como("canal")` | `log_canal` |
 
-As dimensões *When* e *Who* são preenchidas automaticamente pela infraestrutura. A dimensão *Where* é parcialmente automática (identificadores de correlação via OTel e filtro HTTP) e parcialmente declarada (`.em()`). As dimensões *Why* e *How* exigem declaração explícita pelo desenvolvedor — e é exatamente aí que a DSL atua, guiando esse preenchimento.
+As dimensões *When* e *Who* são preenchidas automaticamente pela infraestrutura. A dimensão *Where* é parcialmente automática (identificadores de correlação via OTel) e parcialmente declarada (`.em()`). As dimensões *Why* e *How* exigem declaração explícita pelo desenvolvedor — e é exatamente aí que a DSL atua, guiando esse preenchimento.
 
 Um log com apenas `PedidoService.criar` sem o `pedidoId`, o usuário e o motivo não permite diagnóstico eficiente em produção. Classe e método são metadados técnicos úteis, mas não substituem rastreabilidade funcional.
 
@@ -131,13 +131,12 @@ Em sistemas que processam múltiplas requisições concorrentemente, os identifi
 
 ```json
 {
-  "requestId": "a3f9c2d1-7b44-4e2a-9c2d-1a3b9c2d17b4",
-  "traceId":   "4bf92f3577b34da6a3ce929d0e0e4736",
-  "spanId":    "a3ce929d0e0e4736"
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "spanId":  "a3ce929d0e0e4736"
 }
 ```
 
-O `requestId` isola uma única requisição HTTP dentro de um serviço. O `traceId` — gerado pelo OpenTelemetry e propagado via cabeçalho `traceparent` (W3C TraceContext) — une os eventos de todos os serviços que participaram da mesma operação distribuída. Filtrar por `traceId` em um agregador de logs reconstrói a jornada completa do usuário através de N serviços, em ordem cronológica, com um único filtro.
+O `traceId` — gerado pelo OpenTelemetry e propagado via cabeçalho `traceparent` (W3C TraceContext) — une os eventos de todos os serviços que participaram da mesma operação distribuída. O `spanId` identifica a operação individual atual dentro do trace, permitindo localizar o nó exato da árvore de execução onde ocorreu a falha ou o gargalo. Filtrar por `traceId` em um agregador de logs reconstrói a jornada completa do usuário através de N serviços, em ordem cronológica, com um único filtro.
 
 ### Identidade do serviço
 

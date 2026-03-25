@@ -26,10 +26,9 @@ Campos inseridos automaticamente pelo `GerenciadorContextoLog` via MDC. O desenv
 | `userId` | `string` | Identificador do usuário autenticado. `"anonimo"` quando não autenticado. | Automático — `GerenciadorContextoLog` via SecurityContext |
 | `traceId` | `string` | Identificador do trace distribuído W3C. Presente apenas quando há span OTel ativo. | Automático — OpenTelemetry SDK |
 | `spanId` | `string` | Identificador do span atual dentro do trace. Presente apenas quando há span OTel ativo. | Automático — OpenTelemetry SDK |
-| `requestId` | `string` | Identificador único da requisição HTTP neste serviço. Escopo: um único serviço. | Automático — Filtro JAX-RS *(implementação futura — v0.2)* |
 | `servico` | `string` | Nome do microsserviço ou aplicação. Lido de `quarkus.application.name` ou equivalente. | Automático — `GerenciadorContextoLog` |
 
-**`traceId` vs `requestId`:** os dois identificadores são complementares e respondem a perguntas diferentes. O `traceId` atravessa todos os serviços de uma operação distribuída — é o identificador global. O `requestId` isola o ciclo de vida de uma requisição dentro de um único serviço — é o identificador local. Ambos devem estar presentes em todo evento de log quando disponíveis.
+**`traceId` vs `spanId`:** os dois identificadores são complementares e operam em granularidades diferentes dentro da mesma árvore de execução. O `traceId` é constante ao longo de toda a requisição distribuída — é o identificador global que atravessa todos os serviços. O `spanId` identifica a operação individual atual dentro do trace — é o identificador do nó exato da árvore onde ocorreu a falha ou o gargalo. Juntos, são suficientes para diagnóstico completo em todos os níveis, sem necessidade de identificadores adicionais.
 
 ---
 

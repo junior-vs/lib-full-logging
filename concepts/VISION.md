@@ -129,7 +129,6 @@ Uma descrição completa de cada capacidade está no documento de padrão. A tab
 | Interceptor CDI automático (`@Logged`) | [implementacao_slf4j.md](Logs/implementacao_slf4j.md) / [biblioteca_quarkus.md](Logs/biblioteca_quarkus.md) | v0.1 |
 | Mascaramento automático de dados sensíveis (`SanitizadorDados`) | [Padrão de Logging em Aplicações Java.md § 10](Logs/Padrão de Logging em Aplicações Java.md) | v0.1 |
 | Integração OpenTelemetry (`traceId` / `spanId`) | [biblioteca_quarkus.md § 5.3](Logs/biblioteca_quarkus.md) | v0.1 |
-| Filtro HTTP (`requestId` / contexto de requisição) | [implementacao_slf4j.md § 12](Logs/implementacao_slf4j.md) | v0.2 |
 | Extensão Quarkus (build-time, auto-config, Dev UI) | [biblioteca_quarkus.md](Logs/biblioteca_quarkus.md) | v0.2 |
 | Rastreamento de exceções (`ExceptionReporter`) | [Padrão de Logging em Aplicações Java.md § 14](Logs/Padrão de Logging em Aplicações Java.md) | v0.3 |
 | Log de auditoria (`@Auditable`, `AuditWriter`) | [Padrão de Logging em Aplicações Java.md § 13](Logs/Padrão de Logging em Aplicações Java.md) | v0.3 |
@@ -224,7 +223,6 @@ LogSistematico
 | **Append-Only Stream** | Característica fundamental do log: eventos são acrescentados ao final do fluxo, nunca modificados ou removidos retroativamente. Alterar um registro de log viola esse contrato e pode comprometer investigações de segurança e conformidade regulatória. |
 | **MDC** | Mapped Diagnostic Context — mapa thread-local que armazena pares chave-valor automaticamente acrescentados a todo evento de log emitido naquela thread. Gerenciado pelo `GerenciadorContextoLog`. |
 | **5W1H** | Framework investigativo emprestado do jornalismo e da Análise de Causa Raiz: Who (Quem), What (O quê), When (Quando), Where (Onde), Why (Por quê), How (Como). Todo evento de log deve responder a essas seis dimensões. |
-| **Request ID** | Identificador gerado uma vez por requisição HTTP, propagado em todos os logs e chamadas downstream geradas por aquela requisição. Escopo: um único serviço. |
 | **Trace ID** | Identificador OpenTelemetry que atravessa múltiplos serviços e correlaciona todos os spans de uma única operação distribuída de ponta a ponta. Escopo: toda a operação. |
 | **Span** | Uma unidade de trabalho dentro de um trace — ex: uma query de banco de dados, uma chamada HTTP a serviço downstream, uma publicação de mensagem. Spans formam uma estrutura de árvore sob um Trace. |
 | **Log de Auditoria** | Registro permanente e consultável de ações de usuários sobre entidades de negócio, mantido para conformidade, investigação de segurança e suporte ao cliente. Padrão distinto e complementar ao log de aplicação. |
@@ -344,7 +342,6 @@ LogSistematico
 - **GraalVM Native Image.** Todos os componentes devem ser compatíveis com o modo de compilação nativa do Quarkus para deployments serverless. A extensão Quarkus (`quarkus-logging-extension`) é o veículo natural para registrar hints de reflexão e proxy em build-time.
 - **Propagação de contexto reativo.** Quarkus Mutiny e REST clients reativos usam execução não thread-local. A propagação de contexto via SmallRye Context Propagation já está implementada na biblioteca Quarkus; a extensão deve garantir que seja ativada automaticamente sem configuração manual.
 - **OTel Logs signal.** À medida que o modelo de dados de Logs do OpenTelemetry se estabiliza, uma versão futura deve emitir logs via protocolo OTLP, unificando os três sinais em um único pipeline.
-- **Filtro HTTP com `requestId`.** Implementação do filtro JAX-RS que gera e propaga o `X-Request-ID` header, completando o contrato definido na seção 4.2 do padrão conceitual.
 
 ### 8.2 Extensões e Integrações Possíveis
 
@@ -358,7 +355,7 @@ LogSistematico
 | Fase | Versão | Entregáveis |
 |---|---|---|
 | **Foundation** | `v0.1` | `GerenciadorContextoLog` CDI bean; `LogSistematico` DSL com enforcement 5W1H; `@Logged` interceptor; `SanitizadorDados`; integração OTel (`traceId`/`spanId`); `businessEvent()`; `FIELD_NAMES.md` |
-| **HTTP & Extension** | `v0.2` | Filtro HTTP com `requestId`; extensão Quarkus (`deployment` + `runtime`); auto-config sem `application.properties` manual; Dev UI integrado |
+| **HTTP & Extension** | `v0.2` | Extensão Quarkus (`deployment` + `runtime`); auto-config sem `application.properties` manual; Dev UI integrado |
 | **Audit & Exceptions** | `v0.3` | `@Auditable` CDI interceptor; `AuditWriter` implementations; `ExceptionReporter` com de-duplicação por fingerprint e webhook de notificação |
 | **Módulos Planejados** | `v0.4` | Publicação dos módulos `lib-logging-slf4j` e `quarkus-logging-extension` como artefatos oficiais; alinhamento de API pública e contrato de campos com `lib-logging-quarkus` |
 | **Métricas & Traces** | `v0.5` | Conceituação oficial dos processos de métricas e traces: definição de SLI/SLO, nomenclatura e cardinalidade de labels, estratégia de amostragem, governança de dashboards e runbooks operacionais |

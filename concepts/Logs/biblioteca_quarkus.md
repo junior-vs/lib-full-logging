@@ -38,6 +38,7 @@ exatamente as pessoas que o lerão em um incidente.
 | JSON | `log4j2.xml` + `JsonTemplateLayout` | `quarkus.log.console.json=true` | Uma linha no `application.properties`, sem XML |
 | Contexto HTTP | Spring `@Aspect` + `@Before` | JAX-RS `ContainerRequestFilter` | Padrão Jakarta EE, funciona em native image |
 | TraceId | OTel manual no interceptor | `quarkus-opentelemetry` auto-instrumentado | Quarkus injeta o span automaticamente |
+| Span customizado | Instrumentação manual ad-hoc | `@Rastreado` + `RastreamentoInterceptor` | CDI interceptor declarativo sobre a API OTel oficial |
 | Reatividade | `ThreadLocal` puro | SmallRye Context Propagation | `ThreadLocal` é perdido na troca de thread do Vert.x |
 | Métricas | Micrometer standalone | `quarkus-micrometer-registry-prometheus` | Integrado ao `/q/metrics` sem configuração extra |
 
@@ -63,7 +64,8 @@ lib-logging-quarkus/
 └── src/main/
     ├── java/br/com/seudominio/log/
     │   ├── annotations/
-    │   │   └── Logged.java                   ← @InterceptorBinding CDI
+    │   │   ├── Logged.java                   ← @InterceptorBinding CDI (logging)
+    │   │   └── Rastreado.java                ← @InterceptorBinding CDI (tracing)    ✦ novo
     │   ├── context/
     │   │   ├── LogContexto.java              ← Record: snapshot imutável do MDC
     │   │   ├── GerenciadorContextoLog.java   ← Ciclo de vida do MDC + OTel
@@ -75,10 +77,13 @@ lib-logging-quarkus/
     │   │   └── LogSistematico.java           ← Ponto de entrada público da DSL
     │   ├── filtro/
     │   │   └── LogContextoFiltro.java        ← ContainerRequestFilter JAX-RS
-    │   └── interceptor/
-    │       └── LogInterceptor.java           ← CDI @AroundInvoke + Micrometer
+    │   ├── interceptor/
+    │   │   ├── LogInterceptor.java           ← CDI @AroundInvoke + Micrometer
+    │   │   └── RastreamentoInterceptor.java  ← CDI @AroundInvoke + OTel Tracer      ✦ novo
+    │   └── tracing/
+    │       └── GerenciadorRastreamento.java  ← Ciclo de vida do Span + MDC sync     ✦ novo
     └── resources/
-        └── application.properties            ← Configuração JSON + níveis
+        └── application.properties            ← Configuração JSON + níveis + OTLP
 ```
 
 ---
@@ -234,8 +239,8 @@ a sincronização NTP na infraestrutura.
 
 Mascarar dados sensíveis na aplicação não é suficiente se o canal de transporte não estiver
 protegido. Logs transmitidos em texto claro entre o container e o coletor (Fluentd, Logstash,
-OTel Collector) podem expor dados de contexto não mascarados — como `userId`, `requestId`,
-`traceId` e nomes de entidades — a qualquer observador de rede.
+OTel Collector) podem expor dados de contexto não mascarados — como `userId`,
+`traceId`, `spanId` e nomes de entidades — a qualquer observador de rede.
 
 **Requisito:** o transporte de logs entre nós da rede deve usar **SSL/TLS**, garantindo
 confidencialidade e autenticidade do fluxo. Isso se aplica ao canal entre a aplicação e o
@@ -908,23 +913,10 @@ transversal, sem o `@Aspect` do Spring.
 A identidade do usuário é obtida via `SecurityContext` do JAX-RS, compatível
 com qualquer mecanismo de autenticação configurado no Quarkus (JWT, OIDC, Basic).
 
-**`requestId` vs. `traceId` — dois identificadores complementares:**
-
-O filtro atual popula `traceId` e `spanId` (via OpenTelemetry) e `userId`. Um segundo
-identificador — o `requestId` — é complementar e responde a uma pergunta diferente:
-
-| Identificador | Escopo | Gerado por | Pergunta que responde |
-|---|---|---|---|
-| `requestId` | Uma requisição HTTP em um único serviço | Filtro JAX-RS (a implementar) | "Todos os logs desta requisição neste processo" |
-| `traceId` | Toda a operação distribuída, em todos os serviços | OpenTelemetry SDK | "Todos os logs de todos os serviços para esta operação" |
-
-O `traceId` é indispensável para cruzar fronteiras de serviço. O `requestId` é útil para
-isolar o ciclo de vida de uma requisição dentro de um único processo — inclusive para
-correlacionar logs antes e depois de uma exceção no mesmo serviço, mesmo que o coletor
-ainda não tenha indexado o trace.
-
-> ⚠️ **Implementação futura:** a geração e propagação automática do `requestId` via
-> `X-Request-ID` header (ou geração interna) está planejada para uma versão futura do filtro.
+O filtro popula o MDC com `traceId`, `spanId` (via OpenTelemetry) e `userId` —
+os três identificadores de correlação do padrão. O `spanId` é o do Root Span
+da requisição HTTP; ele será atualizado para o span filho quando o
+`RastreamentoInterceptor` criar um Child Span para o método de negócio.
 
 ```java
 package br.com.seudominio.log.filtro;
@@ -1109,7 +1101,291 @@ public class LogInterceptor {
 
 ---
 
-### 5.10. Ativação do Interceptor — sem `beans.xml`
+---
+
+### 5.10. `@Rastreado` — Anotação CDI de Tracing
+
+```java
+package br.com.seudominio.log.annotations;
+
+import jakarta.interceptor.InterceptorBinding;
+import java.lang.annotation.*;
+
+/**
+ * Ativa rastreamento distribuído para um bean ou método CDI.
+ *
+ * <p>Quando aplicada, o {@link br.com.seudominio.log.interceptor.RastreamentoInterceptor}
+ * cria um {@code Child Span} no span OTel ativo, registra metadados da operação
+ * (classe, método, hora de início/fim) e propaga o {@code spanId} atualizado
+ * para o MDC — mantendo a correlação com as linhas de log emitidas dentro
+ * do método.</p>
+ *
+ * <p>Pode ser combinada com {@link Logged} no mesmo bean sem conflito:
+ * {@code @Logged} gerencia o MDC de logging; {@code @Rastreado} gerencia
+ * o span OTel. Quando usadas juntas, a ordem de execução é controlada
+ * por {@code @Priority}: {@code RastreamentoInterceptor} executa primeiro
+ * (cria o span), depois {@code LogInterceptor} (registra localização no MDC).</p>
+ *
+ * <pre>{@code
+ * // Apenas tracing
+ * @ApplicationScoped
+ * @Rastreado
+ * public class IntegracaoFiscalClient { ... }
+ *
+ * // Tracing + Logging — interceptors acumulados
+ * @ApplicationScoped
+ * @Logged
+ * @Rastreado
+ * public class PagamentoService { ... }
+ * }</pre>
+ */
+@InterceptorBinding
+@Target({ElementType.TYPE, ElementType.METHOD})
+@Retention(RetentionPolicy.RUNTIME)
+@Inherited
+public @interface Rastreado {
+}
+```
+
+---
+
+### 5.11. `GerenciadorRastreamento` — Ciclo de Vida do Span
+
+Centraliza a criação, enriquecimento e encerramento de spans OTel.
+Separa a lógica de rastreamento do interceptor, tornando cada
+responsabilidade testável de forma isolada.
+
+```java
+package br.com.seudominio.log.tracing;
+
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.context.Scope;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.jboss.logging.MDC;
+
+/**
+ * Gerencia o ciclo de vida de spans customizados para métodos de negócio.
+ *
+ * <p>Responsabilidades:</p>
+ * <ul>
+ *   <li>Criar {@code Child Span} vinculado ao span pai do contexto OTel ativo</li>
+ *   <li>Registrar atributos da operação: classe, método, serviço</li>
+ *   <li>Sincronizar o {@code spanId} atualizado no MDC após criação do span filho</li>
+ *   <li>Marcar o span como {@code ERROR} em caso de exceção — com mensagem e stack trace</li>
+ *   <li>Encerrar o span e fechar o {@link Scope} no {@code finally}</li>
+ * </ul>
+ *
+ * <p>O {@link Tracer} é injetado pelo CDI do Quarkus via
+ * {@code quarkus-opentelemetry} — sem factory manual.</p>
+ */
+@ApplicationScoped
+public class GerenciadorRastreamento {
+
+    private static final String ATRIB_CLASSE  = "codigo.classe";
+    private static final String ATRIB_METODO  = "codigo.metodo";
+    private static final String ATRIB_SERVICO = "servico.nome";
+    private static final String CAMPO_SPAN_ID = "spanId";
+
+    @Inject
+    Tracer tracer;
+
+    @Inject
+    @ConfigProperty(name = "quarkus.application.name", defaultValue = "servico-desconhecido")
+    String nomeServico;
+
+    /**
+     * Inicia um Child Span para a operação identificada por classe e método.
+     *
+     * <p>O span é vinculado automaticamente ao span pai do contexto OTel ativo.
+     * Se não houver span pai ativo, o OTel cria um Root Span.</p>
+     *
+     * <p>O {@code spanId} do novo span é sincronizado no MDC imediatamente,
+     * garantindo que logs emitidos dentro do método carreguem o ID correto.</p>
+     *
+     * @param nomeClasse nome simples da classe interceptada
+     * @param nomeMetodo nome do método interceptado
+     * @return contexto de execução do span — deve ser fechado no {@code finally}
+     */
+    public ContextoSpan iniciar(String nomeClasse, String nomeMetodo) {
+        var nomeSpan = nomeClasse + "." + nomeMetodo;
+
+        var span = tracer.spanBuilder(nomeSpan)
+                .setSpanKind(SpanKind.INTERNAL)
+                .setParent(Context.current())
+                .setAttribute(ATRIB_CLASSE,  nomeClasse)
+                .setAttribute(ATRIB_METODO,  nomeMetodo)
+                .setAttribute(ATRIB_SERVICO, nomeServico)
+                .startSpan();
+
+        // Torna o span filho o span corrente para que chamadas aninhadas
+        // criem seus próprios Child Spans corretamente
+        var scope = span.makeCurrent();
+
+        // Sincroniza spanId no MDC: logs emitidos dentro do método carregam
+        // o ID do span filho, não o ID do span pai da requisição HTTP
+        MDC.put(CAMPO_SPAN_ID, span.getSpanContext().getSpanId());
+
+        return new ContextoSpan(span, scope);
+    }
+
+    /**
+     * Registra um atributo extra no span informado.
+     *
+     * <p>Útil para enriquecer o span com identificadores de domínio
+     * (ex: {@code pedido.id}, {@code pagamento.status}) visíveis
+     * diretamente no painel do Jaeger/Grafana Tempo.</p>
+     *
+     * @param span  span a enriquecer
+     * @param chave nome do atributo OTel (usar notação {@code dominio.campo})
+     * @param valor valor do atributo
+     */
+    public void adicionarAtributo(Span span, String chave, String valor) {
+        span.setAttribute(chave, valor);
+    }
+
+    /**
+     * Marca o span como erro e registra os detalhes da exceção.
+     *
+     * <p>O stack trace completo é registrado como evento do span,
+     * visível na UI do Jaeger sem necessidade de correlação manual com logs.</p>
+     *
+     * @param span  span a ser marcado
+     * @param causa exceção que causou o erro
+     */
+    public void registrarErro(Span span, Throwable causa) {
+        span.setStatus(StatusCode.ERROR, causa.getMessage());
+        span.recordException(causa, Attributes.empty());
+    }
+
+    /**
+     * Encerra o span e fecha o Scope, restaurando o span pai como corrente.
+     *
+     * <p>Deve sempre ser chamado em bloco {@code finally}. O {@code Scope}
+     * não é fechado automaticamente pelo OTel — seu vazamento corrompe
+     * a hierarquia de spans nas requisições subsequentes na mesma thread.</p>
+     *
+     * @param contexto retornado por {@link #iniciar}
+     */
+    public void encerrar(ContextoSpan contexto) {
+        try {
+            contexto.scope().close();   // Restaura span pai como corrente
+        } finally {
+            contexto.span().end();      // Registra hora de término e exporta via OTLP
+        }
+    }
+
+    // ── Estrutura de retorno ──────────────────────────────────────────────────
+
+    /**
+     * Transporta o par (Span, Scope) produzido por {@link #iniciar}.
+     *
+     * <p>{@code record} do Java 21: imutável, sem boilerplate.
+     * O {@code Scope} deve ser fechado antes do {@code Span}
+     * — a ordem de encerramento em {@link #encerrar} garante isso.</p>
+     */
+    public record ContextoSpan(Span span, Scope scope) {}
+}
+```
+
+---
+
+### 5.12. `RastreamentoInterceptor` — CDI Interceptor de Tracing
+
+Intercepta métodos anotados com `@Rastreado` e delega o ciclo de vida do span
+ao `GerenciadorRastreamento`. Executa antes do `LogInterceptor` via `@Priority`
+menor, garantindo que o `spanId` do Child Span já esteja no MDC quando o
+`LogInterceptor` registrar a localização do método.
+
+```java
+package br.com.seudominio.log.interceptor;
+
+import br.com.seudominio.log.annotations.Rastreado;
+import br.com.seudominio.log.tracing.GerenciadorRastreamento;
+import jakarta.annotation.Priority;
+import jakarta.inject.Inject;
+import jakarta.interceptor.AroundInvoke;
+import jakarta.interceptor.Interceptor;
+import jakarta.interceptor.InvocationContext;
+import org.jboss.logging.Logger;
+
+/**
+ * CDI Interceptor ativado por {@link Rastreado}.
+ *
+ * <p>Para cada método interceptado:</p>
+ * <ol>
+ *   <li>Cria um {@code Child Span} OTel vinculado ao span pai da requisição</li>
+ *   <li>Registra classe, método e serviço como atributos do span</li>
+ *   <li>Sincroniza o {@code spanId} do filho no MDC</li>
+ *   <li>Executa o método de negócio</li>
+ *   <li>Em caso de exceção: marca o span como {@code ERROR} com stack trace</li>
+ *   <li>Encerra o span (registra hora de término) e restaura o span pai</li>
+ * </ol>
+ *
+ * <p><b>Ordem na cadeia de interceptors (prioridade menor = executa primeiro):</b></p>
+ * <pre>
+ *   RastreamentoInterceptor  [APPLICATION - 10] → cria span, atualiza spanId no MDC
+ *   LogInterceptor           [APPLICATION]      → registra classe/metodo no MDC
+ *   Método de negócio
+ * </pre>
+ *
+ * <p><b>Falha de infraestrutura OTel:</b> exceções do {@code Tracer} são
+ * capturadas e logadas localmente — nunca relançadas. Uma falha no backend
+ * de rastreamento não deve interromper o fluxo de negócio.</p>
+ */
+@Rastreado
+@Interceptor
+@Priority(Interceptor.Priority.APPLICATION - 10)
+public class RastreamentoInterceptor {
+
+    private static final Logger log = Logger.getLogger(RastreamentoInterceptor.class);
+
+    @Inject
+    GerenciadorRastreamento gerenciador;
+
+    @AroundInvoke
+    public Object rastrear(InvocationContext contexto) throws Exception {
+        var metodo     = contexto.getMethod();
+        var classe     = metodo.getDeclaringClass().getSimpleName();
+        var nomeMetodo = metodo.getName();
+
+        GerenciadorRastreamento.ContextoSpan contextoSpan = null;
+
+        try {
+            contextoSpan = gerenciador.iniciar(classe, nomeMetodo);
+            return contexto.proceed();
+
+        } catch (Exception e) {
+            // Marca o span como ERROR com stack trace — visível no Jaeger
+            if (contextoSpan != null) {
+                gerenciador.registrarErro(contextoSpan.span(), e);
+            }
+            throw e;
+
+        } finally {
+            if (contextoSpan != null) {
+                try {
+                    gerenciador.encerrar(contextoSpan);
+                } catch (Exception otelEx) {
+                    // Falha de infraestrutura OTel não interrompe o fluxo de negócio
+                    log.warnf("Falha ao encerrar span OTel — classe=%s, metodo=%s: %s",
+                            classe, nomeMetodo, otelEx.getMessage());
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+### 5.13. Ativação do Interceptor — sem `beans.xml`
 
 No CDI padrão (Weld, OpenLiberty, Payara), o `beans.xml` com a declaração
 `<interceptors>` é obrigatório para ativar qualquer interceptor. **No Quarkus,
@@ -1380,40 +1656,129 @@ public Pedido buscarOuFalhar(Long pedidoId) {
 
 ---
 
+### Caso 6 — Integração externa com `@Rastreado`
+
+```java
+@ApplicationScoped
+@Rastreado  // Child Span criado para cada método — visível no Jaeger
+public class IntegracaoFiscalClient {
+
+    public NotaFiscal emitir(Pedido pedido) {
+        // Span "IntegracaoFiscalClient.emitir" criado e vinculado ao traceId
+        // da requisição HTTP original.
+        // Qualquer exceção aqui é automaticamente marcada no span como ERROR.
+        return chamarApiReceita(pedido);
+    }
+}
+```
+
+---
+
+### Caso 7 — `@Logged` + `@Rastreado` com atributo de domínio customizado
+
+```java
+@ApplicationScoped
+@Logged     // LogInterceptor: MDC com classe/método + métricas Micrometer
+@Rastreado  // RastreamentoInterceptor: Child Span OTel + spanId do filho no MDC
+public class PagamentoService {
+
+    @Inject GerenciadorRastreamento rastreamento;
+
+    public Pagamento processar(OrdemPagamento ordem) {
+        // Enriquece o span com atributos de domínio — visíveis no Jaeger sem
+        // necessidade de vasculhar logs para encontrar o contexto da operação
+        var spanAtivo = io.opentelemetry.api.trace.Span.current();
+        rastreamento.adicionarAtributo(spanAtivo, "pagamento.ordemId", ordem.getId().toString());
+        rastreamento.adicionarAtributo(spanAtivo, "pagamento.valor",   ordem.getValor().toString());
+
+        LogSistematico
+            .registrando("Pagamento iniciado")
+            .em(PagamentoService.class, "processar")
+            .comDetalhe("ordemId", ordem.getId())
+            .comDetalhe("valor",   ordem.getValor())
+            .info();
+        // JSON inclui: traceId, spanId (Child Span), userId, servico,
+        //              log_classe, log_metodo, detalhe_ordemId, detalhe_valor
+
+        return gateway.processar(ordem);
+    }
+}
+```
+
+**JSON gerado (caso 7 — INFO dentro de método `@Logged` + `@Rastreado`):**
+
+```json
+{
+  "timestamp":          "2026-03-24T14:32:00.847Z",
+  "level":              "INFO",
+  "message":            "Pagamento iniciado",
+  "traceId":            "4bf92f3577b34da6a3ce929d0e0e4736",
+  "spanId":             "f9d3a1b2c4e56789",
+  "userId":             "joao.silva@empresa.com",
+  "servico":            "pagamentos-service",
+  "classe":             "PagamentoService",
+  "metodo":             "processar",
+  "log_classe":         "PagamentoService",
+  "log_metodo":         "processar",
+  "detalhe_ordemId":    "8821",
+  "detalhe_valor":      "1249.90"
+}
+```
+
+> O `spanId` acima é o do **Child Span** criado pelo `RastreamentoInterceptor` —
+> não o do Root Span HTTP. Isso permite localizar exatamente qual operação de negócio
+> gerou cada linha de log no grafo do Jaeger.
+
+---
+
 ## 7. Arquitetura de Observabilidade Completa
 
 Com todas as extensões configuradas, cada requisição gera três sinais correlacionados:
 
 ```
-Requisição HTTP
-      │
-      ▼
-[LogContextoFiltro]  ←── ContainerRequestFilter JAX-RS
-      │  Popula MDC: traceId, spanId, userId, servico
-      │
-      ▼
-[LogInterceptor]     ←── CDI @AroundInvoke em beans @Logged
-      │  Popula MDC: classe, metodo
-      │  Cronômetro iniciado
-      │
-      ▼
+Requisição HTTP recebida
+        │
+        ▼
+[LogContextoFiltro]           ←── ContainerRequestFilter JAX-RS
+        │  MDC: { traceId, spanId(root), userId, servico }
+        │
+        ▼
+[RastreamentoInterceptor]     ←── CDI @AroundInvoke em beans @Rastreado  [Priority = APP - 10]
+        │  Cria Child Span vinculado ao Root Span
+        │  MDC: { spanId atualizado para o filho }
+        │  Cronômetro OTel iniciado
+        │
+        ▼
+[LogInterceptor]              ←── CDI @AroundInvoke em beans @Logged     [Priority = APP]
+        │  MDC: { classe, metodo }
+        │  Cronômetro Micrometer iniciado
+        │
+        ▼
 [Código de Negócio]
-      │  LogSistematico.registrando(...)  → LOG estruturado em JSON
-      │
-      ▼
+        │  LogSistematico.registrando(...)
+        │    → LOG estruturado JSON com: traceId, spanId(filho), userId, servico, ...
+        │
+        ▼
 [LogInterceptor — finally]
-      │  Timer.stop() → MÉTRICA  em /q/metrics (Prometheus)
-      │  Counter de falha se exceção
-      │
-      ▼
+        │  Timer.stop() → MÉTRICA em /q/metrics (Prometheus)
+        │  Counter de falha se exceção
+        │  MDC.remove(classe, metodo)
+        │
+        ▼
+[RastreamentoInterceptor — finally]
+        │  GerenciadorRastreamento.encerrar()
+        │    Scope.close()  → restaura Root Span como corrente
+        │    Span.end()     → registra hora de término, exporta via OTLP → TRACE
+        │
+        ▼
 [LogContextoFiltro — response]
-      │  MDC.clear() → contexto limpo para próxima requisição
-      │
-      ▼
+        │  GerenciadorContextoLog.limpar() → MDC: {} (limpo)
+        │
+        ▼
 Exportadores:
-  ├── Logs JSON     → ELK Stack / Datadog / Loki
-  ├── Métricas      → Prometheus → Grafana
-  └── Traces        → Jaeger / Zipkin (via quarkus-opentelemetry)
+  ├── Logs JSON  → ELK Stack / Datadog / Loki
+  ├── Métricas   → Prometheus → Grafana
+  └── Traces     → Jaeger / Grafana Tempo / Zipkin  (via OTLP)
 
 Correlação: o traceId é a chave que une os três sinais na mesma requisição.
 ```
@@ -1510,11 +1875,14 @@ A lista completa de padrões proibidos, com exemplos de código, está na seçã
 | Linguagem informal ou abreviações ambíguas em mensagens | Log ilegível para quem não escreveu o código — viola princípio editorial |
 | `Logger.getLogger()` com strings livres fora de `LogSistematico` | Viola a DSL — log sem estrutura 5W1H |
 | MDC manipulado fora de `GerenciadorContextoLog` | Risco de vazamento e campos inconsistentes |
-| `traceId` gerado como `UUID.randomUUID()` | Impossibilita correlação com Jaeger/Zipkin |
+| `traceId` gerado como `UUID.randomUUID()` | Impossibilita correlação com Jaeger/Grafana Tempo |
 | `MDC.clear()` fora do bloco `finally` do filtro ou interceptor | Vazamento de contexto em caso de exceção |
 | Dados sensíveis em `.comDetalhe()` com chave ausente no `SanitizadorDados` | Dado sensível registrado sem mascaramento — adicionar chave ao sanitizador |
 | Campo que exige redação total passado via `.comDetalhe()` | Usar mascaramento quando redação (omissão completa) seria obrigatória |
 | `@Logged` em beans sem `quarkus-smallrye-context-propagation` ativo | MDC e span OTel perdidos em pipelines reativos Mutiny |
+| `@Rastreado` em beans sem `quarkus-smallrye-context-propagation` ativo | Child Span perdido na troca de thread do Vert.x — hierarquia de spans corrompida |
+| `Scope.close()` omitido ou fora do `finally` no `GerenciadorRastreamento` | Vazamento de Scope OTel — spans subsequentes na thread ficam com pai errado |
+| `Span.end()` omitido em spans criados manualmente | Span nunca exportado ao Collector — invisível no Jaeger |
 | Computação custosa sem guarda de nível | Overhead de serialização mesmo com nível desabilitado |
 | Eventos de negócio via `log.info()` genérico | Não identificáveis como categoria em ferramentas de observabilidade |
 | Falha de observabilidade (`MeterRegistry`, OTel exporter) relançada como exceção | Interrompe o fluxo de negócio por falha de infraestrutura |
@@ -1532,12 +1900,15 @@ A lista completa de padrões proibidos, com exemplos de código, está na seçã
 - [ ] Campos que exigem redação total omitidos antes de `.comDetalhe()` — não mascarados
 - [ ] Nenhum `UUID.randomUUID()` como `traceId` — contexto OpenTelemetry usado
 - [ ] MDC limpo no bloco `finally` via `GerenciadorContextoLog.limpar()`
+- [ ] `Scope` OTel fechado antes de `Span.end()` — sempre no bloco `finally`
+- [ ] `Span.end()` chamado para todo span criado manualmente
+- [ ] Falhas do `GerenciadorRastreamento` tratadas localmente — não relançadas
 - [ ] Computações custosas protegidas por guarda de nível
 - [ ] Nomes de campos canônicos do [Registro de Nomes de Campos](FIELD_NAMES.md) usados
 - [ ] Eventos críticos incluem `errorCode` para correlação com KEDB
 - [ ] Eventos de negócio usam campo `eventType` identificável — não `log.info()` genérico
 - [ ] Falhas de backend de observabilidade tratadas localmente — não relançadas
-- [ ] `quarkus-smallrye-context-propagation` presente em aplicações com pipelines Mutiny
+- [ ] `quarkus-smallrye-context-propagation` presente em aplicações com `@Rastreado` em pipelines Mutiny
 
 ---
 

@@ -1061,29 +1061,22 @@ ignorado em silêncio.
 
 ## 12. Filtro HTTP — Contexto de Requisição
 
-> Padrão de referência: `requestId` vs. `traceId` — seção 4.2 de [Padrão de Logging em Aplicações Java.md](Padrão de Logging em Aplicações Java.md)
-
 Em ambientes HTTP, o `GerenciadorContextoLog` deve ser inicializado uma única vez por
 requisição — no início do processamento, antes de qualquer código de negócio — e limpo
 na resposta. O `LoggingInterceptor` (seção 10) resolve esse ciclo para chamadas de serviço.
 Para camada HTTP, um filtro de servlet ou JAX-RS é o ponto correto.
 
-**`requestId` vs. `traceId` — dois identificadores complementares:**
+**`traceId` e `spanId` — par mínimo para diagnóstico completo:**
 
 | Identificador | Escopo | Gerado por | Pergunta que responde |
 |---|---|---|---|
-| `requestId` | Uma requisição HTTP em um único serviço | Filtro de servlet / JAX-RS | "Todos os logs desta requisição neste processo" |
+| `spanId` | Uma operação individual dentro do trace | OpenTelemetry SDK | "Em qual nó exato da execução ocorreu a falha ou o gargalo?" |
 | `traceId` | Toda a operação distribuída, em todos os serviços | OpenTelemetry SDK | "Todos os logs de todos os serviços para esta operação" |
 
-O `traceId` é indispensável para cruzar fronteiras de serviço. O `requestId` é útil para
-isolar o ciclo de vida de uma requisição dentro de um único processo — inclusive para
-correlacionar logs antes e depois de uma exceção no mesmo serviço, mesmo que o coletor
-ainda não tenha indexado o trace.
-
-> ⚠️ **Implementação futura:** a implementação do filtro HTTP com geração e propagação
-> automática do `requestId` via cabeçalho `X-Request-ID` está planejada para uma versão
-> futura da biblioteca. Os campos e o contrato de inicialização descritos acima definem
-> o que essa implementação deverá satisfazer.
+O `traceId` é indispensável para cruzar fronteiras de serviço. O `spanId` identifica a
+operação individual atual dentro do trace — esses dois identificadores, fornecidos nativamente
+pelo OpenTelemetry SDK, são suficientes para diagnóstico completo em todos os níveis, sem
+necessidade de identificadores adicionais gerados pelo filtro HTTP.
 
 ---
 
