@@ -7,9 +7,12 @@ import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.context.Scope;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
+import jakarta.interceptor.InvocationContext;
 import org.jboss.logging.MDC;
+
+import java.util.Comparator;
 
 /**
  * Gerencia o ciclo de vida de spans customizados para métodos de negócio.
@@ -28,17 +31,20 @@ import org.jboss.logging.MDC;
  *
  * <p>O {@link Tracer} é injetado pelo CDI via {@code quarkus-opentelemetry} —
  * sem configuração adicional além da já presente no {@code application.properties}.</p>
+ *
+ * <p>O pipeline de enriquecimento executa cada {@link EnriquecedorSpan} em
+ * ordem crescente de {@link EnriquecedorSpan#prioridade()}.
+ * Todos os enriquecedores são executados (sem short-circuit funcional).
+ * Novos enriquecedores são descobertos automaticamente pelo CDI — sem
+ * alteração nesta classe.</p>
  */
 @ApplicationScoped
 public class GerenciadorRastreamento {
 
-    
     Tracer tracer;
 
-    
     @Inject
-    @ConfigProperty(name = "quarkus.application.name", defaultValue = "servico-desconhecido")
-    String nomeServico;
+    Instance<EnriquecedorSpan> enriquecedores;
 
     private static final String CAMPO_SPAN_ID = "spanId";
 
@@ -54,17 +60,21 @@ public class GerenciadorRastreamento {
      * o span correto no Jaeger/Grafana Tempo.</p>
      *
      * @param nomeSpan nome do span no formato {@code "Classe.metodo"}
+     * @param contexto contexto CDI da invocação; repassado para o pipeline de enriquecimento
      * @return contexto do span criado; deve ser passado para {@link #encerrar}
      */
-    public ContextoSpan iniciar(String nomeSpan) {
+    public ContextoSpan iniciar(String nomeSpan, InvocationContext contexto) {
         var span = tracer.spanBuilder(nomeSpan)
                 .setParent(Context.current())
                 .setSpanKind(SpanKind.INTERNAL)
-                .setAttribute("service.name", nomeServico)
                 .startSpan();
 
         var scope = span.makeCurrent();
         MDC.put(CAMPO_SPAN_ID, span.getSpanContext().getSpanId());
+
+        enriquecedores.stream()
+                .sorted(Comparator.comparingInt(EnriquecedorSpan::prioridade))
+                .forEach(e -> e.enriquecer(span, contexto));
 
         return new ContextoSpan(span, scope);
     }

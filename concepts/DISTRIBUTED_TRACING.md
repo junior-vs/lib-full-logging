@@ -219,7 +219,10 @@ lib-logging-quarkus/
     │   ├── LogInterceptor.java
     │   └── RastreamentoInterceptor.java   ← CDI @AroundInvoke + OTel Tracer  ✦ novo
     └── tracing/
-        └── GerenciadorRastreamento.java   ← Ciclo de vida do Span + MDC sync  ✦ novo
+        ├── EnriquecedorSpan.java          ← Interface do pipeline de enriquecimento  ✦ novo
+        ├── EnriquecedorMetadados.java     ← Metadados técnicos (prioridade 10)        ✦ novo
+        ├── EnriquecedorIdentidade.java    ← Identidade do usuário (prioridade 20)     ✦ novo
+        └── GerenciadorRastreamento.java   ← Ciclo de vida do Span + MDC sync          ✦ novo
 ```
 
 ---
@@ -329,11 +332,12 @@ public @interface Rastreado {
 
 Centraliza a criação, enriquecimento e encerramento de spans. Separa a lógica
 OTel do interceptor, tornando cada responsabilidade testável de forma isolada.
+Implementa o padrão **Chain of Responsibility** via `Instance<EnriquecedorSpan>`:
+novos enriquecedores são descobertos automaticamente pelo CDI sem alteração nesta classe.
 
 ```java
 package br.com.seudominio.log.tracing;
 
-import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
@@ -341,131 +345,67 @@ import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.context.Scope;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
+import jakarta.enterprise.inject.Instance;
+import jakarta.interceptor.InvocationContext;
 import org.jboss.logging.MDC;
 
-/**
- * Gerencia o ciclo de vida de spans customizados para métodos de negócio.
- *
- * <p>Responsabilidades:</p>
- * <ul>
- *   <li>Criar {@code Child Span} vinculado ao span pai do contexto OTel ativo</li>
- *   <li>Registrar metadados da operação: classe, método, serviço</li>
- *   <li>Sincronizar o {@code spanId} atualizado no MDC após criação do span filho</li>
- *   <li>Marcar o span como erro em caso de exceção — com mensagem e tipo</li>
- *   <li>Encerrar o span e fechar o {@link Scope} no {@code finally}</li>
- * </ul>
- *
- * <p>O {@link Tracer} é injetado pelo CDI do Quarkus via
- * {@code quarkus-opentelemetry} — sem factory manual.</p>
- */
+import java.util.Comparator;
+
 @ApplicationScoped
 public class GerenciadorRastreamento {
 
-    private static final String ATRIB_CLASSE  = "codigo.classe";
-    private static final String ATRIB_METODO  = "codigo.metodo";
-    private static final String ATRIB_SERVICO = "servico.nome";
     private static final String CAMPO_SPAN_ID = "spanId";
 
-    @Inject
     Tracer tracer;
+    Instance<EnriquecedorSpan> enriquecedores;
 
-    @Inject
-    @org.eclipse.microprofile.config.inject.ConfigProperty(
-            name = "quarkus.application.name",
-            defaultValue = "servico-desconhecido")
-    String nomeServico;
+    public GerenciadorRastreamento(Tracer tracer, Instance<EnriquecedorSpan> enriquecedores) {
+        this.tracer = tracer;
+        this.enriquecedores = enriquecedores;
+    }
 
     /**
-     * Inicia um Child Span para a operação identificada por classe e método.
+     * Cria um Child Span e executa o pipeline de enriquecimento.
      *
-     * <p>O span é vinculado automaticamente ao span pai do contexto OTel ativo
-     * (propagado pelo Quarkus via cabeçalho W3C {@code traceparent}).
-     * Se não houver span pai ativo, o OTel cria um Root Span.</p>
-     *
-     * <p>O {@code spanId} do novo span é sincronizado no MDC imediatamente,
-     * garantindo que logs emitidos dentro do método carreguem o ID correto.</p>
-     *
-     * @param nomeClasse  nome simples da classe interceptada
-     * @param nomeMetodo  nome do método interceptado
-     * @return contexto de execução do span — deve ser fechado no {@code finally}
+     * Fluxo:
+     *   1. Cria span filho a partir do contexto OTel ativo
+     *   2. Torna o span filho corrente (scope)
+     *   3. Atualiza o MDC com o spanId do filho
+     *   4. Executa o pipeline de enriquecimento em ordem crescente de prioridade
      */
-    public ContextoSpan iniciar(String nomeClasse, String nomeMetodo) {
-        var nomeSpan = nomeClasse + "." + nomeMetodo;
-
+    public ContextoSpan iniciar(String nomeSpan, InvocationContext contexto) {
         var span = tracer.spanBuilder(nomeSpan)
-                .setSpanKind(SpanKind.INTERNAL)
                 .setParent(Context.current())
-                .setAttribute(ATRIB_CLASSE,  nomeClasse)
-                .setAttribute(ATRIB_METODO,  nomeMetodo)
-                .setAttribute(ATRIB_SERVICO, nomeServico)
+                .setSpanKind(SpanKind.INTERNAL)
                 .startSpan();
 
-        // Torna o span filho o span corrente — necessário para que chamadas
-        // aninhadas criem seus próprios Child Spans corretamente
         var scope = span.makeCurrent();
-
-        // Sincroniza spanId no MDC: logs emitidos dentro do método carregam
-        // o ID do span filho, não o ID do span pai da requisição HTTP
         MDC.put(CAMPO_SPAN_ID, span.getSpanContext().getSpanId());
+
+        enriquecedores.stream()
+                .sorted(Comparator.comparingInt(EnriquecedorSpan::prioridade))
+                .forEach(e -> e.enriquecer(span, contexto));
 
         return new ContextoSpan(span, scope);
     }
 
-    /**
-     * Registra um atributo extra no span ativo — sem alterar o MDC.
-     *
-     * <p>Útil para enriquecer o span com identificadores de negócio
-     * (ex: {@code pedido.id}, {@code pagamento.status}) visíveis
-     * diretamente no painel do Jaeger/Grafana Tempo.</p>
-     *
-     * @param chave nome do atributo OTel (usar notação {@code dominio.campo})
-     * @param valor valor do atributo
-     */
-    public void adicionarAtributo(Span span, String chave, String valor) {
-        span.setAttribute(chave, valor);
-    }
-
-    /**
-     * Marca o span como erro e registra os detalhes da exceção.
-     *
-     * <p>O OTel registra o stack trace completo como evento do span,
-     * visível na UI do Jaeger sem necessidade de correlação manual com logs.</p>
-     *
-     * @param span    span a ser marcado
-     * @param causa   exceção que causou o erro
-     */
-    public void registrarErro(Span span, Throwable causa) {
-        span.setStatus(StatusCode.ERROR, causa.getMessage());
-        span.recordException(causa, Attributes.empty());
-    }
-
-    /**
-     * Encerra o span e fecha o Scope, restaurando o span pai como corrente.
-     *
-     * <p>Deve sempre ser chamado em bloco {@code finally} — o {@code Scope}
-     * não é fechado automaticamente pelo OTel e seu vazamento corrompe
-     * a hierarquia de spans nas requisições subsequentes na mesma thread.</p>
-     *
-     * @param contexto retornado por {@link #iniciar}
-     */
-    public void encerrar(ContextoSpan contexto) {
-        try {
-            contexto.scope().close();   // Restaura span pai como corrente
-        } finally {
-            contexto.span().end();      // Registra hora de término e envia ao Collector
+    /** Encerra o span e restaura o spanId do pai no MDC. */
+    public void encerrar(ContextoSpan ctx, String spanIdPai) {
+        ctx.scope().close();
+        ctx.span().end();
+        if (spanIdPai != null) {
+            MDC.put(CAMPO_SPAN_ID, spanIdPai);
+        } else {
+            MDC.remove(CAMPO_SPAN_ID);
         }
     }
 
-    // ── Estrutura de retorno ──────────────────────────────────────────────────
+    /** Marca o span como ERROR e registra a exceção como evento do span. */
+    public void marcarErro(ContextoSpan ctx, Throwable causa) {
+        ctx.span().setStatus(StatusCode.ERROR, causa.getMessage());
+        ctx.span().recordException(causa);
+    }
 
-    /**
-     * Transporta o par (Span, Scope) produzido por {@link #iniciar}.
-     *
-     * <p>{@code record} do Java 21: imutável, sem boilerplate.
-     * O {@code Scope} precisa ser fechado antes do {@code Span}
-     * — a ordem de encerramento em {@link #encerrar} garante isso.</p>
-     */
     public record ContextoSpan(Span span, Scope scope) {}
 }
 ```
@@ -475,9 +415,9 @@ public class GerenciadorRastreamento {
 ### 11.6. `RastreamentoInterceptor` — CDI Interceptor de Tracing
 
 Intercepta métodos anotados com `@Rastreado` e delega o ciclo de vida do span
-ao `GerenciadorRastreamento`. Executa antes do `LogInterceptor` (`@Priority`
-menor = executa primeiro na cadeia CDI), garantindo que o `spanId` do filho
-esteja no MDC quando o `LogInterceptor` registrar a localização.
+ao `GerenciadorRastreamento`. Executa antes do `LogInterceptor` via `@Priority`
+menor, garantindo que o `spanId` do Child Span já esteja no MDC quando o
+`LogInterceptor` registrar a localização do método.
 
 ```java
 package br.com.seudominio.log.interceptor;
@@ -485,76 +425,48 @@ package br.com.seudominio.log.interceptor;
 import br.com.seudominio.log.annotations.Rastreado;
 import br.com.seudominio.log.tracing.GerenciadorRastreamento;
 import jakarta.annotation.Priority;
-import jakarta.inject.Inject;
 import jakarta.interceptor.AroundInvoke;
 import jakarta.interceptor.Interceptor;
 import jakarta.interceptor.InvocationContext;
+import org.jboss.logging.MDC;
 
 /**
  * CDI Interceptor ativado por {@link Rastreado}.
  *
- * <p>Para cada método interceptado:</p>
- * <ol>
- *   <li>Cria um {@code Child Span} OTel vinculado ao span pai da requisição</li>
- *   <li>Registra classe, método e serviço como atributos do span</li>
- *   <li>Sincroniza o {@code spanId} do filho no MDC</li>
- *   <li>Executa o método de negócio</li>
- *   <li>Em caso de exceção: marca o span como {@code ERROR} com stack trace</li>
- *   <li>Encerra o span (registra hora de término) e restaura o span pai</li>
- * </ol>
- *
- * <p><b>Ordem de prioridade na cadeia de interceptors:</b></p>
- * <ul>
- *   <li>{@code RastreamentoInterceptor} — {@code Priority = APPLICATION - 10}
- *       → executa primeiro: cria o span filho e atualiza o MDC</li>
- *   <li>{@code LogInterceptor} — {@code Priority = APPLICATION}
- *       → executa depois: lê o {@code spanId} já atualizado no MDC</li>
- * </ul>
- *
- * <p><b>Falha de infraestrutura OTel:</b> exceções do {@code Tracer} são
- * capturadas e logadas localmente — nunca relançadas. Uma falha no backend
- * de rastreamento não deve interromper o fluxo de negócio.</p>
+ * Ordem na cadeia:
+ *   RastreamentoInterceptor  [APPLICATION - 10] → cria span, atualiza spanId no MDC
+ *   LogInterceptor           [APPLICATION]      → registra classe/metodo no MDC
+ *   Método de negócio
  */
 @Rastreado
 @Interceptor
 @Priority(Interceptor.Priority.APPLICATION - 10)
 public class RastreamentoInterceptor {
 
-    private static final org.jboss.logging.Logger log =
-            org.jboss.logging.Logger.getLogger(RastreamentoInterceptor.class);
-
-    @Inject
     GerenciadorRastreamento gerenciador;
+
+    public RastreamentoInterceptor(GerenciadorRastreamento gerenciador) {
+        this.gerenciador = gerenciador;
+    }
 
     @AroundInvoke
     public Object rastrear(InvocationContext contexto) throws Exception {
         var metodo     = contexto.getMethod();
         var classe     = metodo.getDeclaringClass().getSimpleName();
         var nomeMetodo = metodo.getName();
+        var nomeSpan   = classe + "." + nomeMetodo;
 
-        GerenciadorRastreamento.ContextoSpan contextoSpan = null;
+        // Salva o spanId do pai antes de criar o Child Span para restaurar no finally
+        var spanIdPai = (String) MDC.get("spanId");
 
+        var contextoSpan = gerenciador.iniciar(nomeSpan, contexto);
         try {
-            contextoSpan = gerenciador.iniciar(classe, nomeMetodo);
             return contexto.proceed();
-
         } catch (Exception e) {
-            // Marca o span como erro com stack trace — visível no Jaeger
-            if (contextoSpan != null) {
-                gerenciador.registrarErro(contextoSpan.span(), e);
-            }
+            gerenciador.marcarErro(contextoSpan, e);
             throw e;
-
         } finally {
-            if (contextoSpan != null) {
-                try {
-                    gerenciador.encerrar(contextoSpan);
-                } catch (Exception otelEx) {
-                    // Falha de infraestrutura OTel não interrompe o fluxo de negócio
-                    log.warnf("Falha ao encerrar span OTel — classe=%s, metodo=%s: %s",
-                            classe, nomeMetodo, otelEx.getMessage());
-                }
-            }
+            gerenciador.encerrar(contextoSpan, spanIdPai);
         }
     }
 }
@@ -562,27 +474,115 @@ public class RastreamentoInterceptor {
 
 ---
 
-### 11.7. Atualização do `LogContextoFiltro`
+### 11.7. `EnriquecedorSpan` — Interface do Pipeline de Enriquecimento
 
-O filtro existente não requer alterações funcionais. A única atualização
-necessária é a remoção do bloco de documentação sobre `requestId`, que foi
-**excluído do padrão**. O filtro já popula `traceId` e `spanId` corretamente
-via `GerenciadorContextoLog`.
+Define o contrato para enriquecer spans com atributos OTel. O `GerenciadorRastreamento`
+descobre implementações via CDI (`Instance<EnriquecedorSpan>`) e as executa em ordem
+crescente de `prioridade()` — sem acoplamento a nenhuma implementação concreta.
 
 ```java
-// Comportamento inalterado — documentação interna simplificada:
-//
-// Fase REQUEST:  GerenciadorContextoLog.inicializar(userId)
-//                → captura traceId + spanId do span OTel ativo
-//                → popula MDC com traceId, spanId, userId, servico
-//
-// Fase RESPONSE: GerenciadorContextoLog.limpar()
-//                → MDC limpo — sem vazamento entre requisições
+package br.com.seudominio.log.tracing;
+
+import io.opentelemetry.api.trace.Span;
+import jakarta.interceptor.InvocationContext;
+
+public interface EnriquecedorSpan {
+
+    /**
+     * Enriquece o span com atributos OTel.
+     *
+     * @param span     span ativo no momento da interceptação
+     * @param contexto contexto CDI; use {@code getParameters()} para acessar
+     *                 os argumentos reais do método interceptado
+     */
+    void enriquecer(Span span, InvocationContext contexto);
+
+    /**
+     * Ordem de execução na cadeia — valor menor executa primeiro.
+     * Padrão: {@link Integer#MAX_VALUE}.
+     */
+    default int prioridade() {
+        return Integer.MAX_VALUE;
+    }
+}
 ```
+
+**Bandas de prioridade convencionadas:**
+
+| Faixa | Tipo | Implementações embutidas |
+|---|---|---|
+| 1–50 | Atributos técnicos obrigatórios | `EnriquecedorMetadados` (10), `EnriquecedorIdentidade` (20) |
+| 100+ | Atributos de negócio opcionais | Qualquer enriquecedor de domínio da aplicação |
 
 ---
 
-### 11.8. Exemplos de Uso
+### 11.8. Enriquecedores Embutidos
+
+**`EnriquecedorMetadados` (prioridade 10)** — adiciona atributos técnicos via
+[OTel Code Semantic Conventions](https://opentelemetry.io/docs/specs/semconv/code/):
+
+| Atributo OTel | Valor |
+|---|---|
+| `service.name` | `${quarkus.application.name}` |
+| `code.namespace` | Nome qualificado da classe interceptada |
+| `code.function` | Nome do método interceptado |
+
+**`EnriquecedorIdentidade` (prioridade 20)** — adiciona `enduser.id` quando a
+requisição não é anônima. Usa `SecurityIdentity` do Quarkus — nunca `null`,
+retorna identidade anônima quando nenhuma extensão de segurança está configurada.
+
+---
+
+### 11.9. Exemplo — Enriquecedor de Negócio Customizado
+
+Enriquecedores de negócio implementam `EnriquecedorSpan` e são descobertos
+automaticamente pelo CDI. O `contexto.getParameters()` expõe os argumentos reais
+da invocação — útil para extrair identificadores e valores visíveis no
+Jaeger/Grafana Tempo sem alterar o código de negócio.
+
+```java
+/**
+ * Enriquecedor de negócio — captura operandos da operação de divisão.
+ * Prioridade 100: executa após os enriquecedores de infra (10 e 20).
+ */
+@ApplicationScoped
+public class EnriquecedorOperacao implements EnriquecedorSpan {
+
+    @Override
+    public void enriquecer(Span span, InvocationContext contexto) {
+        if (!"divide".equals(contexto.getMethod().getName())) return;
+
+        var p = contexto.getParameters();
+        if (p == null || p.length < 2) return;
+
+        // Java 21: pattern matching com instanceof — sem cast explícito
+        if (p[0] instanceof Double dividendo && p[1] instanceof Double divisor) {
+            span.setAttribute("operacao.dividendo", dividendo.toString());
+            span.setAttribute("operacao.divisor",   divisor.toString());
+            span.setAttribute("operacao.risco",     divisor == 0.0);
+        }
+    }
+
+    @Override
+    public int prioridade() { return 100; }
+}
+```
+
+**Saída esperada no span (visível no Jaeger/Grafana Tempo):**
+
+| Atributo | Tipo | Descrição |
+|---|---|---|
+| `service.name` | `string` | `pedidos-service` (de `EnriquecedorMetadados`) |
+| `code.namespace` | `string` | `br.com.seudominio.CalcService` |
+| `code.function` | `string` | `divide` |
+| `enduser.id` | `string` | `joao.silva@empresa.com` (de `EnriquecedorIdentidade`) |
+| `operacao.dividendo` | `string` | `10.0` |
+| `operacao.divisor` | `string` | `2.0` |
+| `operacao.risco` | `boolean` | `false` |
+
+---
+
+### 11.10. Exemplos de Uso
 
 **Caso 1 — Apenas `@Rastreado`: serviço de integração externa**
 
@@ -625,23 +625,30 @@ public class PagamentoService {
 }
 ```
 
-**Caso 3 — Span com atributo de negócio customizado**
+**Caso 3 — Atributos de negócio via `EnriquecedorSpan`**
+
+Para adicionar atributos de domínio ao span sem alterar o código de negócio,
+implemente `EnriquecedorSpan`. O CDI descobre automaticamente novos enriquecedores.
 
 ```java
 @ApplicationScoped
-public class EstoqueService {
+public class EnriquecedorEstoque implements EnriquecedorSpan {
 
-    @Inject GerenciadorRastreamento rastreamento;
+    @Override
+    public void enriquecer(Span span, InvocationContext contexto) {
+        if (!"reservar".equals(contexto.getMethod().getName())) return;
 
-    @Rastreado
-    public void reservar(String skuId, int quantidade) {
-        // Enriquece o span com atributo de domínio — visível no painel do Jaeger
-        var spanAtivo = io.opentelemetry.api.trace.Span.current();
-        rastreamento.adicionarAtributo(spanAtivo, "estoque.sku",        skuId);
-        rastreamento.adicionarAtributo(spanAtivo, "estoque.quantidade", String.valueOf(quantidade));
-
-        // ... lógica de reserva
+        var p = contexto.getParameters();
+        if (p != null && p.length >= 2
+                && p[0] instanceof String sku
+                && p[1] instanceof Integer quantidade) {
+            span.setAttribute("estoque.sku",        sku);
+            span.setAttribute("estoque.quantidade", String.valueOf(quantidade));
+        }
     }
+
+    @Override
+    public int prioridade() { return 100; }
 }
 ```
 
@@ -669,7 +676,7 @@ qual operação de negócio gerou cada linha de log no grafo do Jaeger.
 
 ---
 
-### 11.9. Diagrama de Fluxo — Requisição com `@Logged` + `@Rastreado`
+### 11.11. Diagrama de Fluxo — Requisição com `@Logged` + `@Rastreado`
 
 ```
 Requisição HTTP recebida
@@ -711,3 +718,23 @@ LogContextoFiltro.filter(response)
        └─ MDC: {} (limpo)
 ```
 
+---
+
+## Decições Arquiteturais:
+Problema atual: o GerenciadorRastreamento é sólido, mas adicionarAtributo() é chamado manualmente pelo código de negócio. À medida que o projeto crescer, cada serviço vai querer enriquecer spans com atributos diferentes — alguns obrigatórios (como servico.nome), outros opcionais (como pagamento.valor). Sem estrutura, isso vira código ad-hoc espalhado.
+O que propor: uma cadeia de EnriquecedorSpan que executa em sequência quando um span é iniciado. Cada enriquecedor decide se tem algo a contribuir e passa adiante.
+javapublic interface EnriquecedorSpan {
+    void enriquecer(Span span, InvocationContext contexto);
+}
+
+// Enriquecedor obrigatório — nome do serviço, classe, método
+@ApplicationScoped
+public class EnriquecedorMetadados implements EnriquecedorSpan { ... }
+
+// Enriquecedor opcional — injeta SecurityIdentity se disponível
+@ApplicationScoped
+public class EnriquecedorIdentidade implements EnriquecedorSpan { ... }
+
+// GerenciadorRastreamento injeta todos e executa em ordem
+@Inject Instance<EnriquecedorSpan> enriquecedores;
+Benefício concreto: o GerenciadorRastreamento deixa de saber "o que" enriquecer — ele apenas orquestra. Novos atributos obrigatórios de segurança, regulatórios ou de negócio entram como novos beans sem alterar o núcleo.

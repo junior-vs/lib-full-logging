@@ -1,6 +1,7 @@
 package br.com.vsjr.labs.log.interceptor;
 
 import br.com.vsjr.labs.log.annotations.Rastreado;
+import br.com.vsjr.labs.log.dsl.LogSistematico;
 import br.com.vsjr.labs.log.tracing.GerenciadorRastreamento;
 import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
@@ -34,7 +35,7 @@ import org.jboss.logging.MDC;
 @Priority(Interceptor.Priority.APPLICATION - 10)
 public class RastreamentoInterceptor {
 
-    
+
     GerenciadorRastreamento gerenciador;
 
     public RastreamentoInterceptor(GerenciadorRastreamento gerenciador) {
@@ -59,14 +60,22 @@ public class RastreamentoInterceptor {
         // Salva o spanId do pai antes de criar o Child Span para restaurar no finally
         var spanIdPai = (String) MDC.get("spanId");
 
-        var contextoSpan = gerenciador.iniciar(nomeSpan);
+        var contextoSpan = gerenciador.iniciar(nomeSpan, contexto);
         try {
             return contexto.proceed();
         } catch (Exception e) {
             gerenciador.marcarErro(contextoSpan, e);
             throw e;
         } finally {
-            gerenciador.encerrar(contextoSpan, spanIdPai);
+            try {
+                gerenciador.encerrar(contextoSpan, spanIdPai);
+            } catch (Exception otelEx) {
+                LogSistematico.registrando("Falha ao encerrar span OTel")
+                        .em(RastreamentoInterceptor.class, "rastrear")
+                        .porque("Exceção durante encerramento de span OTel")
+                        .como("Interceptor de rastreamento")
+                        .erro(otelEx);
+            }
         }
     }
 }

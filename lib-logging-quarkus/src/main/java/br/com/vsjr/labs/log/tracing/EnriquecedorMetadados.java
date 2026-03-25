@@ -1,0 +1,43 @@
+package br.com.vsjr.labs.log.tracing;
+
+import io.opentelemetry.api.trace.Span;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import jakarta.interceptor.InvocationContext;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+
+/**
+ * Enriquecedor obrigatório — metadados técnicos da invocação.
+ *
+ * <p>Prioridade {@code 10}: executa primeiro na cadeia, garantindo que os
+ * atributos de identificação básica estejam presentes antes de qualquer
+ * enriquecedor de negócio.</p>
+ *
+ * <p>Atributos adicionados seguindo as
+ * <a href="https://opentelemetry.io/docs/specs/semconv/code/">OTel Code Semantic Conventions</a>:</p>
+ * <ul>
+ *   <li>{@code service.name}   — nome do serviço ({@code quarkus.application.name})</li>
+ *   <li>{@code code.namespace} — nome qualificado da classe interceptada</li>
+ *   <li>{@code code.function}  — nome do método interceptado</li>
+ * </ul>
+ */
+@ApplicationScoped
+public class EnriquecedorMetadados implements EnriquecedorSpan {
+
+    @Inject
+    @ConfigProperty(name = "quarkus.application.name", defaultValue = "servico-desconhecido")
+    String nomeServico;
+
+    @Override
+    public void enriquecer(Span span, InvocationContext contexto) {
+        var metodo = contexto.getMethod();
+        span.setAttribute("service.name", nomeServico);
+        span.setAttribute("code.namespace", metodo.getDeclaringClass().getName());
+        span.setAttribute("code.function", metodo.getName());
+    }
+
+    @Override
+    public int prioridade() {
+        return 10;
+    }
+}
