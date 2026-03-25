@@ -10,7 +10,6 @@ import jakarta.inject.Inject;
 import jakarta.interceptor.AroundInvoke;
 import jakarta.interceptor.Interceptor;
 import jakarta.interceptor.InvocationContext;
-import org.jboss.logging.Logger;
 
 
 
@@ -40,13 +39,15 @@ import org.jboss.logging.Logger;
 @Priority(Interceptor.Priority.APPLICATION)
 public class LogInterceptor {
 
-    private static final Logger log = Logger.getLogger(LogInterceptor.class);
-
-    @Inject
+    
     MeterRegistry meterRegistry;
 
-    @Inject
     GerenciadorContextoLog gerenciador;
+
+    public LogInterceptor(MeterRegistry meterRegistry, GerenciadorContextoLog gerenciador) {
+        this.meterRegistry = meterRegistry;
+        this.gerenciador = gerenciador;
+    }
 
     @AroundInvoke
     public Object interceptar(InvocationContext contexto) throws Exception {

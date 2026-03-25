@@ -1,10 +1,12 @@
 package br.com.vsjr.labs.exemple.rest;
 
 import br.com.vsjr.labs.log.annotations.Logged;
+import br.com.vsjr.labs.log.annotations.Rastreado;
 import br.com.vsjr.labs.log.dsl.LogSistematico;
 import jakarta.enterprise.context.ApplicationScoped;
 
 @Logged
+@Rastreado
 @ApplicationScoped
 public class HelloService {
 

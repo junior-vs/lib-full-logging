@@ -1,16 +1,15 @@
 package br.com.vsjr.labs.log.filtro;
 
+import java.security.Principal;
+
 import br.com.vsjr.labs.log.context.GerenciadorContextoLog;
-import jakarta.inject.Inject;
+import br.com.vsjr.labs.log.dsl.LogSistematico;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.ContainerResponseContext;
 import jakarta.ws.rs.container.ContainerResponseFilter;
 import jakarta.ws.rs.core.SecurityContext;
 import jakarta.ws.rs.ext.Provider;
-import org.jboss.logging.Logger;
-
-import java.security.Principal;
 
 /**
  * Filtro JAX-RS que gerencia o contexto de logging para requisições HTTP.
@@ -31,12 +30,15 @@ import java.security.Principal;
  * via {@code quarkus-smallrye-context-propagation} no pom.xml.</p>
  */
 @Provider
-public class LogContextoFiltro  implements ContainerRequestFilter, ContainerResponseFilter {
+public class LogContextoFiltro implements ContainerRequestFilter, ContainerResponseFilter {
 
-    private static final Logger log = Logger.getLogger(LogContextoFiltro.class);
 
-    @Inject
     GerenciadorContextoLog gerenciador;
+
+
+    public LogContextoFiltro(GerenciadorContextoLog gerenciador) {
+        this.gerenciador = gerenciador;
+    }
 
     /**
      * Fase de requisição: inicializa o MDC antes de qualquer código de negócio.
@@ -46,12 +48,12 @@ public class LogContextoFiltro  implements ContainerRequestFilter, ContainerResp
         var userId = resolverUsuario(requestContext);
         var contexto = gerenciador.inicializar(userId);
 
-        // DEBUG condicional: útil para diagnóstico de problemas de contexto
-        if (log.isDebugEnabled()) {
-            log.debugf("Contexto de log inicializado — userId=%s, traceId=%s",
-                    contexto.userId(),
-                    contexto.temTrace() ? contexto.traceId() : "sem-trace");
-        }
+        LogSistematico
+                .registrando("Contexto de log inicializado")
+                .em(LogContextoFiltro.class, "filter")
+                .comDetalhe("userId", contexto.userId())
+                .comDetalhe("traceId", contexto.temTrace() ? contexto.traceId() : "sem-trace")
+                .debug();
     }
 
     /**
