@@ -3,7 +3,6 @@ package br.com.vsjr.labs.log.context;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
-import jakarta.inject.Inject;
 import jakarta.interceptor.InvocationContext;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.MDC;
@@ -32,21 +31,23 @@ import java.util.Comparator;
 @ApplicationScoped
 public class GerenciadorContextoLog {
 
-    // Nome do serviço injetado do application.properties
-    @Inject
-    @ConfigProperty(name = "quarkus.application.name", defaultValue = "servico-desconhecido")
-    String nomeServico;
-
-    @Inject
+    String applicationName;
     Instance<EnriquecedorContexto> enriquecedores;
 
+    public GerenciadorContextoLog(
+            @ConfigProperty(name = "quarkus.application.name", defaultValue = "aplicacao-desconhecido") String applicationName,
+            Instance<EnriquecedorContexto> enriquecedores) {
+        this.applicationName = applicationName;
+        this.enriquecedores = enriquecedores;
+    }
+
     private static final String CAMPO_USER_ID = "userId";
-    private static final String CAMPO_SERVICO = "servico";
+    private static final String CAMPO_APPLICATION = "aplicacao";
 
     /**
      * Inicializa o MDC com o contexto de identificação da requisição atual.
      *
-     * <p>Popula apenas {@code userId} e {@code servico}. Os campos de rastreamento
+     * <p>Popula apenas {@code userId} e {@code applicationName}. Os campos de rastreamento
      * distribuído ({@code traceId}, {@code spanId}) são responsabilidade do
      * {@code GerenciadorRastreamento}, que deve ser chamado na mesma fase de filtro.</p>
      *
@@ -56,8 +57,8 @@ public class GerenciadorContextoLog {
     public LogContexto inicializar(String userId) {
         var uid = userId != null ? userId : "anonimo";
         MDC.put(CAMPO_USER_ID, uid);
-        MDC.put(CAMPO_SERVICO, nomeServico);
-        return new LogContexto(uid, nomeServico);
+        MDC.put(CAMPO_APPLICATION, applicationName);
+        return new LogContexto(uid, applicationName);
     }
 
     /**

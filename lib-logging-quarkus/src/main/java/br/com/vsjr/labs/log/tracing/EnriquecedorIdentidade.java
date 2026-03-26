@@ -3,8 +3,6 @@ package br.com.vsjr.labs.log.tracing;
 import io.opentelemetry.api.trace.Span;
 import io.quarkus.security.identity.SecurityIdentity;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.inject.Instance;
-import jakarta.inject.Inject;
 import jakarta.interceptor.InvocationContext;
 
 /**
@@ -24,12 +22,16 @@ import jakarta.interceptor.InvocationContext;
 @ApplicationScoped
 public class EnriquecedorIdentidade implements EnriquecedorSpan {
 
-    @Inject
-    Instance<SecurityIdentity> identidade;
+    SecurityIdentity identidade;
 
+    public EnriquecedorIdentidade(SecurityIdentity identidade) {
+        this.identidade = identidade;
+    }
+
+    @Override
     public void enriquecer(Span span, InvocationContext contexto) {
-        if (identidade.isResolvable() && !identidade.get().isAnonymous()) {
-            span.setAttribute("enduser.id", identidade.get().getPrincipal().getName());
+        if (!identidade.isAnonymous()) {
+            span.setAttribute("enduser.id", identidade.getPrincipal().getName());
         }
     }
 

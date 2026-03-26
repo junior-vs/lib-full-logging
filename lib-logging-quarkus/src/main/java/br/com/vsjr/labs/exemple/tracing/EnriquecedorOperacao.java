@@ -13,7 +13,7 @@ import jakarta.interceptor.InvocationContext;
  * Jaeger/Grafana Tempo.</p>
  *
  * <p>Prioridade {@code 100}: executa após os enriquecedores obrigatórios de
- * infra ({@code 10} e {@code 20}), garantindo que {@code service.name} e
+ * infra ({@code 10} e {@code 20}), garantindo que {@code application.name} e
  * {@code enduser.id} já estejam presentes antes dos atributos de negócio.</p>
  *
  * <p>Atua <b>apenas</b> no método {@code divide} — o guard na assinatura do

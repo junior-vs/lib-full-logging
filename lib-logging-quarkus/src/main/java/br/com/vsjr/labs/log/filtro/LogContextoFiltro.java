@@ -21,7 +21,7 @@ import jakarta.ws.rs.ext.Provider;
  * <p>Executa em duas fases:</p>
  * <ol>
  *   <li><b>Request</b>: extrai o usuário autenticado, inicializa o MDC com
- *       {@code userId} e {@code servico} via {@link GerenciadorContextoLog}, e
+ *       {@code userId} e {@code applicationName} via {@link GerenciadorContextoLog}, e
  *       sincroniza {@code traceId} e {@code spanId} do span OTel ativo via
  *       {@link GerenciadorRastreamento} — mantendo as responsabilidades separadas.</li>
  *   <li><b>Response</b>: limpa o MDC — obrigatório para evitar vazamento de

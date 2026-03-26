@@ -1,14 +1,14 @@
 package br.com.vsjr.labs.log.interceptor;
 
+import org.jboss.logging.MDC;
+
 import br.com.vsjr.labs.log.annotations.Rastreado;
 import br.com.vsjr.labs.log.dsl.LogSistematico;
 import br.com.vsjr.labs.log.tracing.GerenciadorRastreamento;
 import jakarta.annotation.Priority;
-import jakarta.inject.Inject;
 import jakarta.interceptor.AroundInvoke;
 import jakarta.interceptor.Interceptor;
 import jakarta.interceptor.InvocationContext;
-import org.jboss.logging.MDC;
 
 /**
  * CDI Interceptor ativado por {@link Rastreado}.

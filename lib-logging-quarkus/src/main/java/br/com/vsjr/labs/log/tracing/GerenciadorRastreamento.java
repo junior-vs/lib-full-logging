@@ -1,5 +1,9 @@
 package br.com.vsjr.labs.log.tracing;
 
+import java.util.Comparator;
+
+import org.jboss.logging.MDC;
+
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
@@ -8,11 +12,7 @@ import io.opentelemetry.context.Context;
 import io.opentelemetry.context.Scope;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
-import jakarta.inject.Inject;
 import jakarta.interceptor.InvocationContext;
-import org.jboss.logging.MDC;
-
-import java.util.Comparator;
 
 /**
  * Gerencia o ciclo de vida de spans customizados para métodos de negócio.
@@ -42,15 +42,14 @@ import java.util.Comparator;
 public class GerenciadorRastreamento {
 
     Tracer tracer;
-
-    @Inject
     Instance<EnriquecedorSpan> enriquecedores;
 
     private static final String CAMPO_TRACE_ID = "traceId";
     private static final String CAMPO_SPAN_ID = "spanId";
 
-    public GerenciadorRastreamento(Tracer tracer) {
+    public GerenciadorRastreamento(Tracer tracer, Instance<EnriquecedorSpan> enriquecedores) {
         this.tracer = tracer;
+        this.enriquecedores = enriquecedores;
     }
 
     /**

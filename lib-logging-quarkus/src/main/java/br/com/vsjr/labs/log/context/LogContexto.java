@@ -4,7 +4,7 @@ package br.com.vsjr.labs.log.context;
  * Snapshot imutável do contexto de correlação de uma requisição.
  *
  * <p>Produzido pelo {@link GerenciadorContextoLog} a partir da identidade autenticada
- * e do nome do serviço. Pode ser inspecionado em testes sem dependência de
+ * e do nome da aplicação. Pode ser inspecionado em testes sem dependência de
  * infraestrutura de MDC.</p>
  *
  * <p>Este record pertence exclusivamente à camada de logging. Dados de rastreamento
@@ -15,11 +15,11 @@ package br.com.vsjr.labs.log.context;
  * {@code equals/hashCode/toString} gerados sem boilerplate.</p>
  *
  * @param userId  identificador do usuário autenticado, ou {@code "anonimo"}
- * @param servico nome do microsserviço
+ * @param applicationName nome do microsserviço
  */
 public record LogContexto(
         String userId,
-        String servico
+        String applicationName
 ) {
 
     /**
