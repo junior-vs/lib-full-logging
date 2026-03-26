@@ -70,7 +70,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [resource, attributes, batch]
-      exporters: [logging, elasticsearch]
+      exporters: [logging, elasticsearch, otlp/graylog]
 
     metrics:
       receivers: [otlp, prometheus]
@@ -80,7 +80,7 @@ service:
     logs:
       receivers: [otlp]
       processors: [resource, attributes, batch]
-      exporters: [logging, elasticsearch]
+      exporters: [logging, elasticsearch, otlp/graylog]
 
   telemetry:
     logs:

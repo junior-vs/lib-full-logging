@@ -4,6 +4,7 @@ import java.util.Comparator;
 
 import org.jboss.logging.MDC;
 
+import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
@@ -29,8 +30,9 @@ import jakarta.interceptor.InvocationContext;
  * para manter a separação de responsabilidades: este bean cuida do ciclo de
  * vida do span OTel; o outro cuida do MDC de correlação da requisição HTTP.</p>
  *
- * <p>O {@link Tracer} é injetado pelo CDI via {@code quarkus-opentelemetry} —
- * sem configuração adicional além da já presente no {@code application.properties}.</p>
+ * <p>O {@link Tracer} é obtido a partir do bean CDI {@code OpenTelemetry},
+ * fornecido pelo {@code quarkus-opentelemetry} — o {@code Tracer} em si
+ * não é um bean CDI direto.</p>
  *
  * <p>O pipeline de enriquecimento executa cada {@link EnriquecedorSpan} em
  * ordem crescente de {@link EnriquecedorSpan#prioridade()}.
@@ -47,8 +49,8 @@ public class GerenciadorRastreamento {
     private static final String CAMPO_TRACE_ID = "traceId";
     private static final String CAMPO_SPAN_ID = "spanId";
 
-    public GerenciadorRastreamento(Tracer tracer, Instance<EnriquecedorSpan> enriquecedores) {
-        this.tracer = tracer;
+    public GerenciadorRastreamento(OpenTelemetry openTelemetry, Instance<EnriquecedorSpan> enriquecedores) {
+        this.tracer = openTelemetry.getTracer(GerenciadorRastreamento.class.getName());
         this.enriquecedores = enriquecedores;
     }
 
