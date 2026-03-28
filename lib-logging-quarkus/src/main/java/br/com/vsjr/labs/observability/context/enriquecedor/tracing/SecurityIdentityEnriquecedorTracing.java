@@ -20,11 +20,11 @@ import jakarta.interceptor.InvocationContext;
  * configurada — o Quarkus provê uma identidade anônima nesse caso, nunca {@code null}.</p>
  */
 @ApplicationScoped
-public class IdentidadeEnriquecedorTracing implements EnriquecedorTracing {
+public class SecurityIdentityEnriquecedorTracing implements EnriquecedorTracing {
 
     SecurityIdentity identidade;
 
-    public IdentidadeEnriquecedorTracing(SecurityIdentity identidade) {
+    public SecurityIdentityEnriquecedorTracing(SecurityIdentity identidade) {
         this.identidade = identidade;
     }
 

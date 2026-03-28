@@ -12,7 +12,7 @@ import java.util.stream.Collectors;
 /**
  * Enriquecedor opcional — perfis do usuário autenticado.
  *
- * <p>Prioridade {@code 20}: executa após {@link LocalizacaoEnriquecedorContexto}.</p>
+ * <p>Prioridade {@code 20}: executa após {@link MetadadosEnriquecedorContexto}.</p>
  *
  * <p>Campo adicionado:</p>
  * <ul>
@@ -28,11 +28,11 @@ import java.util.stream.Collectors;
  * segurança configurada — o Quarkus provê identidade anônima, nunca {@code null}.</p>
  */
 @ApplicationScoped
-public class UsuarioEnriquecedorContexto implements EnriquecedorContexto {
+public class SecurityIdentityEnriquecedorContexto implements EnriquecedorContexto {
 
     SecurityIdentity identidade;
 
-    public UsuarioEnriquecedorContexto(SecurityIdentity identidade) {
+    public SecurityIdentityEnriquecedorContexto(SecurityIdentity identidade) {
         this.identidade = identidade;
     }
 

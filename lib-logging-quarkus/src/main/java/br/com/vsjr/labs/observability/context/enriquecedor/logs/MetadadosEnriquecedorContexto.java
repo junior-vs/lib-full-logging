@@ -1,5 +1,6 @@
 package br.com.vsjr.labs.observability.context.enriquecedor.logs;
 
+import br.com.vsjr.labs.observability.utils.LocalizacaoMetodo;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.interceptor.InvocationContext;
 import org.jboss.logging.MDC;
@@ -19,13 +20,13 @@ import java.util.Set;
  * </ul>
  */
 @ApplicationScoped
-public class LocalizacaoEnriquecedorContexto implements EnriquecedorContexto {
+public class MetadadosEnriquecedorContexto implements EnriquecedorContexto {
 
     @Override
     public void enriquecer(InvocationContext contexto) {
-        var metodo = contexto.getMethod();
-        MDC.put("classe", metodo.getDeclaringClass().getSimpleName());
-        MDC.put("metodo", metodo.getName());
+        var localizacao = LocalizacaoMetodo.extrair(contexto);
+        MDC.put("classe", localizacao.classeSimples());
+        MDC.put("metodo", localizacao.metodo());
     }
 
     @Override

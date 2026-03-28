@@ -3,8 +3,9 @@ package br.com.vsjr.labs.observability.interceptor;
 import org.jboss.logging.MDC;
 
 import br.com.vsjr.labs.observability.annotations.Rastreado;
-import br.com.vsjr.labs.observability.core.LogSistematico;
+import br.com.vsjr.labs.observability.logs.LogSistematico;
 import br.com.vsjr.labs.observability.context.GerenciadorTracing;
+import br.com.vsjr.labs.observability.utils.LocalizacaoMetodo;
 import jakarta.annotation.Priority;
 import jakarta.interceptor.AroundInvoke;
 import jakarta.interceptor.Interceptor;
@@ -52,10 +53,8 @@ public class TracingInterceptor {
      */
     @AroundInvoke
     public Object rastrear(InvocationContext contexto) throws Exception {
-        var metodo = contexto.getMethod();
-        var classe = metodo.getDeclaringClass().getSimpleName();
-        var nomeMetodo = metodo.getName();
-        var nomeSpan = classe + "." + nomeMetodo;
+        var localizacao = LocalizacaoMetodo.extrair(contexto);
+        var nomeSpan = localizacao.operacao();
 
         // Salva o spanId do pai antes de criar o Child Span para restaurar no finally
         var spanIdPai = (String) MDC.get("spanId");

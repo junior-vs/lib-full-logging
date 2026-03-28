@@ -1,5 +1,6 @@
 package br.com.vsjr.labs.observability.context.enriquecedor.tracing;
 
+import br.com.vsjr.labs.observability.utils.LocalizacaoMetodo;
 import io.opentelemetry.api.trace.Span;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.interceptor.InvocationContext;
@@ -32,10 +33,10 @@ public class MetadadosEnriquecedorTracing implements EnriquecedorTracing {
 
     @Override
     public void enriquecer(Span span, InvocationContext contexto) {
-        var metodo = contexto.getMethod();
+        var localizacao = LocalizacaoMetodo.extrair(contexto);
         span.setAttribute("application.name", applicationName);
-        span.setAttribute("code.namespace", metodo.getDeclaringClass().getName());
-        span.setAttribute("code.function", metodo.getName());
+        span.setAttribute("code.namespace", localizacao.classeQualificada());
+        span.setAttribute("code.function", localizacao.metodo());
     }
 
     @Override

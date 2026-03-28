@@ -1,4 +1,4 @@
-package br.com.vsjr.labs.observability.core;
+package br.com.vsjr.labs.observability.logs;
 
 import java.util.Collections;
 import java.util.Map;

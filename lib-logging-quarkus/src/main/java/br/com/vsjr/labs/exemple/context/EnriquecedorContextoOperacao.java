@@ -1,8 +1,9 @@
 package br.com.vsjr.labs.exemple.context;
 
 import br.com.vsjr.labs.observability.context.enriquecedor.logs.EnriquecedorContexto;
-import br.com.vsjr.labs.observability.context.enriquecedor.logs.LocalizacaoEnriquecedorContexto;
-import br.com.vsjr.labs.observability.context.enriquecedor.logs.UsuarioEnriquecedorContexto;
+import br.com.vsjr.labs.observability.context.enriquecedor.logs.MetadadosEnriquecedorContexto;
+import br.com.vsjr.labs.observability.context.enriquecedor.logs.SecurityIdentityEnriquecedorContexto;
+import br.com.vsjr.labs.observability.utils.LocalizacaoMetodo;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.interceptor.InvocationContext;
 import org.jboss.logging.MDC;
@@ -15,8 +16,8 @@ import java.util.Set;
  *
  * <p>Demonstra como estender o pipeline de enriquecimento do MDC com contexto
  * de domínio, complementando os enriquecedores obrigatórios de infraestrutura
- * ({@link LocalizacaoEnriquecedorContexto} com prioridade {@code 10} e
- * {@link UsuarioEnriquecedorContexto} com prioridade {@code 20}).</p>
+ * ({@link MetadadosEnriquecedorContexto} com prioridade {@code 10} e
+ * {@link SecurityIdentityEnriquecedorContexto} com prioridade {@code 20}).</p>
  *
  * <p>Campo adicionado ao MDC:</p>
  * <ul>
@@ -41,9 +42,7 @@ public class EnriquecedorContextoOperacao implements EnriquecedorContexto {
 
     @Override
     public void enriquecer(InvocationContext contexto) {
-        var metodo = contexto.getMethod();
-        var nome = metodo.getDeclaringClass().getSimpleName() + "." + metodo.getName();
-        MDC.put("operacao.nome", nome);
+        MDC.put("operacao.nome", LocalizacaoMetodo.extrair(contexto).operacao());
     }
 
     @Override

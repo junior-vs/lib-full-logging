@@ -2,7 +2,7 @@ package br.com.vsjr.labs.exemple.rest;
 
 import br.com.vsjr.labs.observability.annotations.Logged;
 import br.com.vsjr.labs.observability.annotations.Rastreado;
-import br.com.vsjr.labs.observability.core.LogSistematico;
+import br.com.vsjr.labs.observability.logs.LogSistematico;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Response;
 

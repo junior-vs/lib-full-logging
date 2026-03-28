@@ -1,4 +1,4 @@
-package br.com.vsjr.labs.observability.core;
+package br.com.vsjr.labs.observability.logs;
 
 
 import br.com.vsjr.labs.observability.utils.SanitizadorDados;
