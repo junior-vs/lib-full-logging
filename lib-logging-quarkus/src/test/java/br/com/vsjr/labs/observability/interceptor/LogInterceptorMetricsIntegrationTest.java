@@ -8,6 +8,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.common.http.TestHTTPResource;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -30,6 +31,9 @@ class LogInterceptorMetricsIntegrationTest {
 
     @Inject
     MeterRegistry meterRegistry;
+
+    @ConfigProperty(name = "quarkus.application.name")
+    String applicationName;
 
     @TestHTTPResource("/q/metrics")
     URI metricsUri;
@@ -68,20 +72,21 @@ class LogInterceptorMetricsIntegrationTest {
         var request = HttpRequest.newBuilder(metricsUri).GET().build();
         var response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
         var corpo = response.body();
+        var nomePrometheus = applicationName.replaceAll("[^A-Za-z0-9_]", "_");
 
         assertEquals(200, response.statusCode());
-        assertTrue(corpo.contains("metodo_execucao_seconds_count"));
-        assertTrue(corpo.contains("metodo_falha_total"));
+        assertTrue(corpo.contains(nomePrometheus + "_metodo_execucao_seconds_count"));
+        assertTrue(corpo.contains(nomePrometheus + "_metodo_falha_total"));
     }
 
     private Timer encontrarTimerExecucao() {
-        return meterRegistry.find("metodo.execucao")
+        return meterRegistry.find(applicationName + ".metodo.execucao")
                 .tags("classe", "HelloService", "metodo", "sayHello")
                 .timer();
     }
 
     private Counter encontrarContadorFalha() {
-        return meterRegistry.find("metodo.falha")
+        return meterRegistry.find(applicationName + ".metodo.falha")
                 .tags("classe", "HelloService", "metodo", "divide", "excecao", "NullPointerException")
                 .counter();
     }

@@ -2,7 +2,7 @@ package br.com.vsjr.labs.example.rest;
 
 import br.com.vsjr.labs.observability.annotations.Logged;
 import br.com.vsjr.labs.observability.annotations.Rastreado;
-import br.com.vsjr.labs.observability.dsl.LogSistematico;
+import br.com.vsjr.labs.observability.dsl.LOG;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Response;
 
@@ -39,7 +39,7 @@ public class HelloworldResource {
     @Path("/world")
     @GET
     public String hello() {
-        LogSistematico
+        LOG
                 .registrando("Recurso Hello World invocado")
                 .em(HelloworldResource.class, "hello")
                 .porque("Solicitação de saudação recebida")
@@ -70,7 +70,7 @@ public class HelloworldResource {
             @QueryParam("token") String token,
             @QueryParam("cpf") String cpf) {
 
-        LogSistematico
+        LOG
                 .registrando("Consulta de pedido recebida")
                 .em(HelloworldResource.class, "buscarPedido")
                 .porque("Chamada à API de consulta de pedido")
@@ -97,7 +97,7 @@ public class HelloworldResource {
         try {
             return helloService.divide(a, b);
         } catch (Exception e) {
-            LogSistematico
+            LOG
                     .registrando("Falha na operação de divisão")
                     .em(HelloworldResource.class, "divide")
                     .porque("Erro propagado do serviço de divisão")

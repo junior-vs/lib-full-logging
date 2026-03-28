@@ -3,7 +3,7 @@ package br.com.vsjr.labs.observability.interceptor;
 import org.jboss.logging.MDC;
 
 import br.com.vsjr.labs.observability.annotations.Rastreado;
-import br.com.vsjr.labs.observability.dsl.LogSistematico;
+import br.com.vsjr.labs.observability.dsl.LOG;
 import br.com.vsjr.labs.observability.security.LocalizacaoMetodo;
 import br.com.vsjr.labs.observability.tracing.GerenciadorTracing;
 import jakarta.annotation.Priority;
@@ -69,7 +69,7 @@ public class TracingInterceptor {
             try {
                 gerenciador.encerrar(contextoSpan, spanIdPai);
             } catch (Exception otelEx) {
-                LogSistematico.registrando("Falha ao encerrar span OTel")
+                LOG.registrando("Falha ao encerrar span OTel")
                         .em(TracingInterceptor.class, "rastrear")
                         .porque("Exceção durante encerramento de span OTel")
                         .como("Interceptor de rastreamento")

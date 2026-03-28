@@ -56,7 +56,7 @@ class LogSistematicoTest {
         logger.addHandler(handler);
 
         try {
-            LogSistematico.registrando("Evento teste")
+            LOG.registrando("Evento teste")
                     .em(ServicoTeste.class, " PROCESSAR ")
                     .como(" API REST ")
                     .porque(null)

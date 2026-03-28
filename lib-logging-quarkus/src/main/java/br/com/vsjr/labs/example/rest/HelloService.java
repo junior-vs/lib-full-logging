@@ -2,11 +2,11 @@ package br.com.vsjr.labs.example.rest;
 
 import br.com.vsjr.labs.observability.annotations.Logged;
 import br.com.vsjr.labs.observability.annotations.Rastreado;
-import br.com.vsjr.labs.observability.dsl.LogSistematico;
+import br.com.vsjr.labs.observability.dsl.LOG;
 import jakarta.enterprise.context.ApplicationScoped;
 
 /**
- * Serviço de exemplo que demonstra todas as funcionalidades da DSL {@link LogSistematico}.
+ * Serviço de exemplo que demonstra todas as funcionalidades da DSL {@link LOG}.
  *
  * <p>A anotação {@link Logged} na classe ativa o {@code LogInterceptor} em todos os
  * métodos: injeta {@code userId}, {@code traceId}, {@code spanId}, {@code classe} e
@@ -33,7 +33,7 @@ public class HelloService {
      * Demonstra o terminador {@code info()} com as dimensões Why e How.
      */
     public String sayHello() {
-        LogSistematico
+        LOG
                 .registrando("Serviço Hello executado")
                 .em(HelloService.class, "sayHello")
                 .porque("Solicitação de saudação recebida")
@@ -59,7 +59,7 @@ public class HelloService {
      */
     public String buscarPedido(String pedidoId, String token, String cpf) {
         if (pedidoId == null || pedidoId.isBlank()) {
-            LogSistematico
+            LOG
                     .registrando("Identificador de pedido ausente")
                     .em(HelloService.class, "buscarPedido")
                     .porque("pedidoId nulo ou vazio recebido na requisição")
@@ -69,7 +69,7 @@ public class HelloService {
             return "pedido não encontrado";
         }
 
-        LogSistematico
+        LOG
                 .registrando("Buscando pedido")
                 .em(HelloService.class, "buscarPedido")
                 .porque("Consulta de pedido solicitada")
@@ -95,7 +95,7 @@ public class HelloService {
         try {
             return a / b;
         } catch (ArithmeticException e) {
-            LogSistematico
+            LOG
                     .registrando("Erro de divisão")
                     .em(HelloService.class, "divide")
                     .porque("Divisão por zero detectada")
@@ -105,7 +105,7 @@ public class HelloService {
                     .erro(e);
             return 0d;
         } catch (Exception e) {
-            LogSistematico
+            LOG
                     .registrando("Erro inesperado na divisão")
                     .em(HelloService.class, "divide")
                     .porque("Exceção não tratada durante a operação de divisão")

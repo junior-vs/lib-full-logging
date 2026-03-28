@@ -2,11 +2,9 @@ package br.com.vsjr.labs.observability.tracing;
 
 import java.util.Comparator;
 
-import br.com.vsjr.labs.observability.context.GerenciadorContextoLog;
-import br.com.vsjr.labs.observability.tracing.enriquecedor.EnriquecedorTracing;
-
 import org.jboss.logging.MDC;
 
+import br.com.vsjr.labs.observability.tracing.enriquecedor.EnriquecedorTracing;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;

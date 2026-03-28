@@ -1,49 +1,59 @@
 package br.com.vsjr.labs.observability.interceptor;
 
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import br.com.vsjr.labs.observability.annotations.Logged;
 import br.com.vsjr.labs.observability.context.GerenciadorContextoLog;
+import br.com.vsjr.labs.observability.dsl.LOG;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
-import jakarta.enterprise.inject.Instance;
 import jakarta.annotation.Priority;
+import jakarta.enterprise.inject.Instance;
 import jakarta.interceptor.AroundInvoke;
 import jakarta.interceptor.Interceptor;
 import jakarta.interceptor.InvocationContext;
-import org.jboss.logging.Logger;
-
-
 
 /**
  * CDI Interceptor ativado por {@link Logged}.
  *
- * <p>Para cada método interceptado:</p>
+ * <p>
+ * Para cada método interceptado:
+ * </p>
  * <ol>
- *   <li>Executa o pipeline de enriquecimento do contexto de logging ({@code Chain of Responsibility})</li>
- *   <li>Executa o método de negócio</li>
- *   <li>Limpa os campos de localização do MDC no {@code finally}</li>
+ * <li>Executa o pipeline de enriquecimento do contexto de logging
+ * ({@code Chain of Responsibility})</li>
+ * <li>Executa o método de negócio</li>
+ * <li>Limpa os campos de localização do MDC no {@code finally}</li>
  * </ol>
  *
- * <p>Os campos de correlação da requisição ({@code traceId}, {@code userId})
- * são responsabilidade do {@link br.com.vsjr.labs.observability.filtro.LogContextoFiltro} e
- * permanecem intactos durante toda a execução da requisição.</p>
+ * <p>
+ * Os campos de correlação da requisição ({@code traceId}, {@code userId})
+ * são responsabilidade do
+ * {@link br.com.vsjr.labs.observability.filtro.LogContextoFiltro} e
+ * permanecem intactos durante toda a execução da requisição.
+ * </p>
  *
- * <p><b>Métricas:</b> registra duração de execução ({@code metodo.execucao}) e
+ * <p>
+ * <b>Métricas:</b> registra duração de execução ({@code metodo.execucao}) e
  * falhas por tipo de exceção ({@code metodo.falha}) com isolamento de falha de
  * infraestrutura: qualquer erro de medição é apenas registrado em WARN e nunca
- * interrompe o fluxo de negócio.</p>
+ * interrompe o fluxo de negócio.
+ * </p>
  */
 @Logged
 @Interceptor
 @Priority(Interceptor.Priority.APPLICATION)
 public class LogInterceptor {
 
-    private static final Logger LOG = Logger.getLogger(LogInterceptor.class);
-
+    
+    private final String applicationName;
     private final GerenciadorContextoLog gerenciador;
     private final MeterRegistry meterRegistry;
 
-    public LogInterceptor(GerenciadorContextoLog gerenciador, Instance<MeterRegistry> meterRegistryInstance) {
+    public LogInterceptor(
+            @ConfigProperty(name = "quarkus.application.name", defaultValue = "application-desconhecido") String applicationName,
+            GerenciadorContextoLog gerenciador, Instance<MeterRegistry> meterRegistryInstance) {
+        this.applicationName = applicationName;
         this.gerenciador = gerenciador;
         this.meterRegistry = meterRegistryInstance.isResolvable() ? meterRegistryInstance.get() : null;
     }
@@ -53,7 +63,7 @@ public class LogInterceptor {
         gerenciador.enriquecer(contexto);
         var sample = iniciarAmostra();
         try {
-            return contexto.proceed();
+            return contexto.proceed(); 
         } catch (Throwable erro) {
             registrarFalha(contexto, erro);
             if (erro instanceof Exception excecao) {
@@ -82,13 +92,17 @@ public class LogInterceptor {
         }
         try {
             meterRegistry.counter(
-                    "metodo.falha.total",
+                    applicationName + ".metodo.falha",
                     "classe", resolverClasse(contexto),
                     "metodo", resolverMetodo(contexto),
-                    "excecao", erro.getClass().getSimpleName()
-            ).increment();
+                    "excecao", erro.getClass().getSimpleName()).increment();
         } catch (Exception metricaFalhou) {
-            LOG.warnf("Falha ao registrar métrica: %s", metricaFalhou.getMessage());
+
+            LOG.registrando("Registro de métrica de falha")
+                    .em(this.getClass(), "registrarFalha")
+                    .como("Métrica de falha")
+                    .porque(String.format("Falha ao registrar métrica: %s", metricaFalhou.getMessage()))
+                    .warn();
         }
     }
 
@@ -97,13 +111,18 @@ public class LogInterceptor {
             return;
         }
         try {
-            sample.stop(Timer.builder("metodo.execucao")
+            sample.stop(Timer.builder(applicationName + ".metodo.execucao")
                     .tag("classe", resolverClasse(contexto))
                     .tag("metodo", resolverMetodo(contexto))
                     .publishPercentileHistogram()
                     .register(meterRegistry));
         } catch (Exception metricaFalhou) {
-            LOG.warnf("Falha ao registrar métrica: %s", metricaFalhou.getMessage());
+
+            LOG.registrando("Registro de métrica de execução")
+                    .em(this.getClass(), "registrarExecucao")
+                    .como("Métrica de execução")
+                    .porque(String.format("Falha ao registrar métrica: %s", metricaFalhou.getMessage()))
+                    .warn();
         }
     }
 
