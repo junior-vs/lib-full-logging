@@ -1,0 +1,605 @@
+# Métricas
+
+> **Documentos relacionados:**
+> - [5W1H](5W1H.md) — fundamentos de contexto semântico para logs estruturados
+> - [Rastreamento Distribuído](DISTRIBUTED_TRACING.md) — o terceiro pilar da observabilidade
+> - [Campos Canônicos](FIELD_NAMES.md) — padronização de nomes de campos e tags
+> - [Padrões de Codificação](CODING_STANDARDS.md) — falhas de `MeterRegistry` não propagam como exceção de negócio
+
+---
+
+## Parte I — Conceitos
+
+---
+
+### 1. O Problema: o que Logs e Traces não Respondem
+
+Logs e traces são indispensáveis para diagnóstico — eles respondem *o que aconteceu* e *por onde a requisição passou*. Mas eles não foram projetados para responder perguntas de volume e tendência sobre o sistema como um todo:
+
+- A taxa de erros no último minuto subiu ou desceu?
+- O tempo de resposta do endpoint `POST /pedidos` nos últimos 30 dias segue tendência de degradação?
+- Quantas requisições simultâneas o sistema está atendendo agora?
+- A fila de processamento está crescendo ou estabilizando?
+
+Responder essas perguntas a partir de logs exigiria consultar e agregar potencialmente milhões de registros em tempo real — operação custosa, com latência incompatível com alertas de produção. Métricas existem precisamente para tornar essas perguntas respondíveis em milissegundos, com custo computacional desprezível.
+
+> **Métricas dizem *se* há um problema; Traces dizem *onde* ele está; Logs dizem *qual* foi o erro exato.**
+
+---
+
+### 2. Métricas nos Três Pilares da Observabilidade
+
+Métricas são o segundo pilar da observabilidade. Os três pilares são complementares — cada um captura uma dimensão diferente do comportamento do sistema:
+
+| Pilar | Pergunta Central | Natureza do Dado | Custo de Consulta |
+|---|---|---|---|
+| **Logging** | *"O que aconteceu em um momento específico?"* | Registros discretos de eventos com contexto e severidade | Alto — varredura de volume |
+| **Métricas** | *"Com que frequência, volume e tendência?"* | Valores numéricos agregados em séries temporais | Baixo — pré-agregado |
+| **Tracing** | *"Por onde a requisição passou e onde demorou?"* | Grafo temporal de operações encadeadas | Médio — por `traceId` |
+
+O OpenTelemetry é a infraestrutura que une os três sinais em um único pipeline de telemetria, com correlação nativa pelo `traceId`.
+
+---
+
+### 3. O que é uma Métrica
+
+Uma métrica é uma **medição numérica capturada em um ponto no tempo**, associada a um nome e a um conjunto de dimensões (*tags*). Métricas são armazenadas em **bancos de dados de séries temporais** (*time series databases*), onde cada nova medição é adicionada ao final da série — sem sobrescrever valores anteriores.
+
+Essa natureza de série temporal é o que torna métricas adequadas para análise de tendência, detecção de anomalias e configuração de alertas. Quando o Prometheus armazena `http_server_requests_seconds_count`, ele mantém cada valor com seu timestamp — permitindo calcular a taxa de crescimento, identificar picos e configurar alertas por limiar.
+
+**Características fundamentais:**
+
+- **Pré-agregação:** ao contrário de logs, métricas são calculadas na origem e transmitidas já em forma agregada. O contador de requisições não envia um evento por requisição — acumula e envia a contagem periodicamente.
+- **Baixa cardinalidade por design:** cada combinação única de nome de métrica e conjunto de tags produz uma série temporal independente. O número total de séries deve ser controlado.
+- **Resolução temporal configurável:** métricas são amostradas em intervalos regulares (ex: a cada 15 segundos pelo Prometheus). Eventos que ocorrem entre dois *scrapes* são agregados, não individualmente registrados.
+
+---
+
+### 4. Tipos Fundamentais de Medidores
+
+O Micrometer define quatro tipos primitivos de medidores (*meters*), suficientes para modelar qualquer fenômeno observável em sistemas de software:
+
+#### 4.1. Counter (Contador)
+
+Registra um valor que **somente aumenta**. Nunca decresce — apenas avança. Quando um serviço reinicia, o contador retorna a zero.
+
+**Quando usar:** eventos que ocorrem e são contados — requisições processadas, erros lançados, mensagens consumidas, pagamentos aprovados.
+
+**Pergunta que responde:** *"Quantas vezes X aconteceu?"* e, por derivação, *"Com que taxa X está acontecendo?"* (calculada como `delta(counter) / delta(tempo)`).
+
+```
+Exemplos:
+  metodo.falha{classe="PagamentoService", metodo="processar", excecao="GatewayException"}
+  http.requests.total{uri="/pedidos", method="POST", status="200"}
+  ordem.pagamento.recusado{gateway="Cielo", motivo="saldo_insuficiente"}
+```
+
+**Anti-padrão:** usar um counter para medir algo que pode diminuir (ex: número de itens em uma fila). Para isso, use um Gauge.
+
+#### 4.2. Gauge (Medidor)
+
+Registra um valor que **pode aumentar ou diminuir** — como o velocímetro de um carro. O Gauge não acumula: ele captura o valor instantâneo no momento da leitura.
+
+**Quando usar:** estados correntes de recursos — tamanho de fila, número de conexões ativas em um pool, uso de memória, número de threads em execução, itens em cache.
+
+**Pergunta que responde:** *"Qual é o valor atual de X?"*
+
+```
+Exemplos:
+  jvm.memory.used{area="heap"}
+  db.connections.active{pool="pedidos-ds"}
+  fila.processamento.tamanho{topico="pagamentos"}
+```
+
+**Nota importante:** o Micrometer não mantém referência forte ao objeto observado pelo Gauge. Se o objeto for coletado pelo GC, o Gauge passa a retornar `NaN`. Sempre mantenha uma referência forte ao objeto instrumentado.
+
+#### 4.3. Timer (Cronômetro)
+
+Mede **latência e frequência** de operações de curta duração. Internamente armazena três valores: a soma de todas as durações medidas, a contagem de ocorrências e o valor máximo observado em uma janela de tempo decrescente (*decaying time window*).
+
+**Quando usar:** qualquer operação com duração mensurável — execução de endpoints HTTP, consultas ao banco de dados, chamadas a APIs externas, processamento de métodos de negócio críticos.
+
+**Pergunta que responde:** *"Quanto tempo X leva? Com que frequência X ocorre? Qual foi a latência máxima recente?"*
+
+```
+Exemplos:
+  metodo.execucao{classe="PedidoService", metodo="criar"}
+  http.server.requests{uri="/pedidos", method="POST"}
+  db.query.duration{operation="SELECT", table="orders"}
+```
+
+Timers suportam **histogramas** e **percentis** (p50, p95, p99) — fundamentais para SLOs. Um valor médio de latência pode esconder que 5% das requisições levam 10x mais tempo.
+
+#### 4.4. Distribution Summary (Sumário de Distribuição)
+
+Semelhante ao Timer, mas para **valores não temporais arbitrários**. Registra distribuição de magnitudes — tamanho de payload, número de itens em uma resposta, valor de transações financeiras.
+
+**Quando usar:** quando o fenômeno a medir é uma quantidade, não uma duração.
+
+```
+Exemplos:
+  http.response.size{uri="/pedidos", method="GET"}       — tamanho da resposta em bytes
+  pedido.itens.quantidade{canal="checkout"}              — número de itens por pedido
+  pagamento.valor{moeda="BRL", gateway="Cielo"}          — valor das transações
+```
+
+---
+
+### 5. Dimensões (Tags) e o Risco de Explosão de Cardinalidade
+
+Tags são pares chave-valor associados a uma métrica no momento do registro. Elas são o mecanismo que torna métricas **multidimensionais** — permitem fatiar e agrupar dados de formas diferentes sem criar métricas separadas para cada combinação.
+
+```
+metodo.execucao{classe="PedidoService", metodo="criar"}     → latência por método
+metodo.execucao{classe="PagamentoService", metodo="processar"} → latência por método
+```
+
+Com a tag `classe`, uma única métrica `metodo.execucao` cobre todos os serviços. Sem ela, seria necessária uma métrica separada para cada classe — inviável em escala.
+
+**Risco de explosão de cardinalidade:** cada combinação única de nome de métrica e conjunto de tag-values produz uma série temporal independente no banco de tempo. Tags com alta cardinalidade — valores que variam por requisição, como `userId`, `requestId`, `traceId` ou IDs de entidades — multiplicam exponencialmente o número de séries, saturando armazenamento e memória do sistema de coleta.
+
+| Uso de tag | Cardinalidade | Adequado para métrica? |
+|---|---|---|
+| `status` (`200`, `404`, `500`) | Baixa — poucos valores fixos | ✅ Correto |
+| `metodo` (`criar`, `buscar`, `deletar`) | Baixa — conjunto fechado | ✅ Correto |
+| `userId` (milhões de usuários distintos) | Alta — cresce com usuários | ❌ Explosão de cardinalidade |
+| `traceId` (único por requisição) | Extremamente alta | ❌ Nunca usar como tag |
+| `pedidoId` (único por pedido) | Alta — cresce com volume | ❌ Use logs/traces para isso |
+
+**Regra:** use tags apenas para valores de um conjunto **fechado e pequeno**. Para correlacionar uma métrica com uma entidade ou usuário específico, use o `traceId` — ele existe para isso.
+
+---
+
+### 6. Correlação com Logs e Traces
+
+Métricas, por sua natureza agregada, não identificam *qual* requisição causou um problema — elas identificam *que* existe um problema e *onde* no sistema ele está concentrado. O fluxo de investigação típico atravessa os três pilares:
+
+```
+1. ALERTA DISPARA (Prometheus/Grafana)
+   └─ métricas mostram: taxa de erro de PagamentoService.processar acima de 5%
+
+2. ANÁLISE DE TENDÊNCIA (Grafana)
+   └─ histograma revela: p99 de latência subiu de 200ms para 2s nas últimas 2h
+   └─ counter de falhas: erro específico é GatewayException
+
+3. IDENTIFICAÇÃO DO SPAN PROBLEMÁTICO (Jaeger/Grafana Tempo)
+   └─ traces com status=ERROR filtrados por serviço e janela de tempo
+   └─ grafo de spans revela: GatewayClient.cobrar leva 1.8s dos 2s totais
+
+4. DIAGNÓSTICO DETALHADO (Kibana/Loki)
+   └─ filtrar por traceId do trace problemático
+   └─ logs exibem: contexto completo, userId, pedidoId, código de erro do gateway
+```
+
+O `traceId` presente em cada linha de log e em cada span é a chave que torna essa navegação possível. Métricas apontam o problema; traces localizam o componente; logs explicam o contexto exato.
+
+---
+
+### 7. Quando Utilizar cada Tipo de Medidor
+
+| Fenômeno a observar | Tipo recomendado | Justificativa |
+|---|---|---|
+| Número de requisições processadas | Counter | Sempre cresce; taxa calculada por derivação |
+| Número de erros por tipo de exceção | Counter | Sempre cresce; permite alertas por tipo |
+| Latência de endpoints HTTP | Timer | Duração + frequência; suporta percentis |
+| Duração de métodos de negócio | Timer | Duração + frequência; suporta histograma |
+| Conexões ativas em um pool | Gauge | Valor atual — pode subir e descer |
+| Tamanho de uma fila | Gauge | Valor atual — não acumula |
+| Uso de memória JVM | Gauge | Valor amostrado — não acumula |
+| Tamanho de payloads HTTP | Distribution Summary | Valor arbitrário, não temporal |
+| Valor de transações financeiras | Distribution Summary | Distribuição de magnitudes |
+
+**Quando usar um Counter em vez de um Gauge:** se o que você quer medir *pode* ser contado porque sempre incrementa (número de pedidos criados, número de erros lançados), use Counter. O rate de um Counter calculado pelo Prometheus é mais confiável do que um Gauge que pode perder incrementos entre amostras.
+
+---
+
+### 8. Trade-offs
+
+**Perda de granularidade individual:** métricas agregam. Um Timer com p99 de 2 segundos não diz *qual* requisição demorou 2 segundos — apenas que 1% das requisições estão nessa faixa. Para identificar a requisição específica, o `traceId` no log é o caminho.
+
+**Custo de amostragem periódica:** o Prometheus coleta métricas por *scrape* a cada N segundos. Eventos que ocorrem e se resolvem entre dois scrapes podem não ser capturados. Para fenômenos de curta duração ou de ocorrência rara, logs e traces são mais confiáveis.
+
+**Explosão de cardinalidade:** o risco mais grave na prática. Uma tag com alta cardinalidade pode multiplicar o número de séries temporais por ordens de magnitude, saturando memória e armazenamento. Monitorar a cardinalidade do sistema de métricas é parte da operação de observabilidade.
+
+**Overhead de coleta:** timers e contadores em caminhos de alta frequência têm custo — criação de objetos, operações de incremento com sincronização, transmissão periódica. Em caminhos críticos de performance, o tipo de medidor e a estratégia de registro devem ser escolhidos com cuidado.
+
+---
+
+### 9. Padrões Relacionados
+
+- **Log Aggregation** (Iluwatar, Richardson): métricas indicam *se* há um problema e *qual componente* está sofrendo; logs fornecem o contexto detalhado. Os dois são complementares e se referenciam pelo `traceId`.
+- **Distributed Tracing** (Richardson): traces fornecem a visão de latência por span individual; métricas fornecem a visão agregada de latência por operação em janelas de tempo. Um SLO de latência é monitorado via métrica; uma violação específica é investigada via trace.
+- **Health Check API** (MicroProfile): health checks respondem *se* o serviço está operacional (binário); métricas respondem *quão bem* o serviço está operando (contínuo). Ambos são necessários em produção.
+- **Circuit Breaker**: o estado do disjuntor (fechado/aberto/meio-aberto) é uma métrica Gauge natural; o número de ativações é um Counter. Métricas tornam o comportamento do Circuit Breaker visível em dashboards operacionais.
+
+---
+
+## Parte II — Implementação no Quarkus
+
+> Referência: [Quarkus — Micrometer Metrics Guide](https://quarkus.io/guides/telemetry-micrometer) | [Quarkus — Observability Guide](https://quarkus.io/guides/observability)
+
+O Quarkus usa **Micrometer** como abstração de métricas — a abordagem recomendada pela plataforma. O Micrometer define uma API unificada para os quatro tipos de medidores e um `MeterRegistry` que abstrai o backend de destino: o mesmo código de instrumentação funciona com Prometheus, Datadog, InfluxDB ou qualquer outro backend suportado, alterando apenas a dependência Maven e a configuração.
+
+---
+
+### 10. Extensões Maven
+
+```xml
+<!--
+    Micrometer core + integração Quarkus + exportação Prometheus.
+    Expõe /q/metrics automaticamente no HTTP server principal.
+-->
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-micrometer-registry-prometheus</artifactId>
+</dependency>
+
+<!--
+    Alternativa: exportação unificada via OTLP.
+    Permite usar Micrometer para métricas e OTel para traces/logs
+    com um único pipeline de saída — recomendado pela documentação Quarkus.
+    Substitui quarkus-micrometer-registry-prometheus quando o OTel Collector
+    já está no pipeline.
+-->
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-micrometer-opentelemetry</artifactId>
+</dependency>
+```
+
+**Prometheus vs. OTLP:** use `quarkus-micrometer-registry-prometheus` quando o stack de observabilidade já tem Prometheus como coletor de métricas e Grafana como visualização. Use `quarkus-micrometer-opentelemetry` quando o OTel Collector já está no pipeline — ele unifica métricas, traces e logs em um único protocolo OTLP, eliminando um coletor separado.
+
+---
+
+### 11. Configuração (`application.properties`)
+
+```properties
+# ─── Micrometer / Prometheus ──────────────────────────────────────────────────
+
+# Endpoint de métricas exposto em /q/metrics (porta HTTP principal por padrão).
+# Use management.port para expor em porta separada em produção.
+quarkus.micrometer.export.prometheus.enabled=true
+
+# Prefixo para todas as métricas da aplicação — distingue de métricas de infra
+# quarkus.micrometer.export.prometheus.prefix=app
+
+# Ignorar endpoints de health/metrics do próprio Quarkus para não poluir métricas HTTP
+quarkus.micrometer.binder.http-server.ignore-patterns=/q/health.*,/q/metrics
+
+# ─── Tags globais ─────────────────────────────────────────────────────────────
+# Adicionadas automaticamente a todas as métricas — baixa cardinalidade garantida
+# quarkus.micrometer.tags.application=${quarkus.application.name}
+# quarkus.micrometer.tags.environment=${quarkus.profile}
+
+# ─── OTLP (alternativa ao Prometheus) ─────────────────────────────────────────
+# Quando usar quarkus-micrometer-opentelemetry, as métricas são enviadas
+# pelo mesmo endpoint OTLP configurado para traces.
+# quarkus.otel.exporter.otlp.endpoint=http://otel-collector:4317
+```
+
+---
+
+### 12. `MeterRegistry` via CDI
+
+O `MeterRegistry` é o ponto central de registro de todos os medidores. No Quarkus, é injetável diretamente via CDI — sem fábrica manual, sem configuração adicional:
+
+```java
+@ApplicationScoped
+public class PedidoService {
+
+    private final MeterRegistry meterRegistry;
+
+    // Injeção via construtor — preferida para testabilidade
+    public PedidoService(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
+    }
+}
+```
+
+O Quarkus configura e gerencia o ciclo de vida do `MeterRegistry`. Quando múltiplos backends estão configurados (ex: Prometheus + OTLP), o Quarkus cria um `CompositeMeterRegistry` que replica cada medição para todos os backends registrados — sem alteração no código de instrumentação.
+
+---
+
+### 13. Métricas Automáticas do Quarkus
+
+Com `quarkus-micrometer-registry-prometheus` instalado, o Quarkus instrumenta automaticamente, sem nenhuma linha de código adicional:
+
+**Requisições HTTP (RESTEasy Reactive):**
+```
+http_server_requests_seconds_count{method, uri, status, outcome}
+http_server_requests_seconds_sum{method, uri, status, outcome}
+http_server_requests_seconds_max{method, uri, status, outcome}
+```
+
+**JVM:**
+```
+jvm_memory_used_bytes{area}               — memória heap e non-heap
+jvm_gc_pause_seconds{action, cause}       — pausas de GC
+jvm_threads_live_threads                  — threads ativas
+jvm_classes_loaded_classes                — classes carregadas
+```
+
+**Pool de conexões (JDBC/Agroal):**
+```
+agroal_connection_pool_active_count{data_source}
+agroal_connection_pool_available_count{data_source}
+agroal_connection_pool_waiting_count{data_source}
+```
+
+**Netty (camada de rede do Vert.x):**
+```
+allocator_memory_used_bytes{allocator_type, memory_type}
+allocator_pooled_allocations_total{allocator_type}
+```
+
+Essas métricas automáticas cobrem a operação da plataforma. As métricas de negócio e de código de aplicação são responsabilidade do desenvolvedor — e é onde o `LogInterceptor` da biblioteca entra.
+
+---
+
+### 14. Integração com a Biblioteca — `LogInterceptor`
+
+> **Nota de ativação:** a instrumentação já está implementada no `LogInterceptor`, porém a emissão de métricas permanece desabilitada por padrão via configuração (`quarkus.micrometer.enabled=false`).
+
+O `LogInterceptor` (anotação `@Logged`) emite automaticamente duas métricas para cada método interceptado, sem nenhum código adicional no desenvolvedor:
+
+**`metodo.execucao` (Timer com histograma):**
+```
+metodo_execucao_seconds_count{classe, metodo}  — número de invocações
+metodo_execucao_seconds_sum{classe, metodo}    — soma das durações
+metodo_execucao_seconds_max{classe, metodo}    — máximo na janela decrescente
+# com publishPercentileHistogram=true:
+metodo_execucao_seconds_bucket{classe, metodo, le}  — histograma para cálculo de percentis
+```
+
+**`metodo.falha` (Counter por tipo de exceção):**
+```
+metodo_falha_total{classe, metodo, excecao}  — falhas por tipo de exceção
+```
+
+O par `metodo.execucao` + `metodo.falha` permite calcular taxa de erro por método diretamente no Prometheus:
+
+```promql
+# Taxa de erro do PedidoService.criar nos últimos 5 minutos
+rate(metodo_falha_total{classe="PedidoService", metodo="criar"}[5m])
+/
+rate(metodo_execucao_seconds_count{classe="PedidoService", metodo="criar"}[5m])
+```
+
+O histograma habilitado via `publishPercentileHistogram()` permite calcular percentis no Prometheus — o que não é possível com percentis pré-calculados na aplicação, pois eles não são reagregáveis entre instâncias:
+
+```promql
+# p99 de latência do PedidoService.criar — agregado de todas as instâncias
+histogram_quantile(0.99,
+    sum by (le) (
+        rate(metodo_execucao_seconds_bucket{classe="PedidoService", metodo="criar"}[5m])
+    )
+)
+```
+
+**Proteção contra falha de infraestrutura:** falhas do `MeterRegistry` (backend indisponível, timeout de exportação) são capturadas localmente e não propagam como exceção de negócio — conforme o princípio estabelecido no `CODING_STANDARDS.md`:
+
+```java
+} catch (Exception e) {
+    try {
+        meterRegistry.counter("metodo.falha",
+            "classe",  classe,
+            "metodo",  nomeMetodo,
+            "excecao", e.getClass().getSimpleName()
+        ).increment();
+    } catch (Exception metricaFalhou) {
+        // Falha de infraestrutura de observabilidade não interrompe o negócio
+        log.warn("Falha ao registrar métrica: {}", metricaFalhou.getMessage());
+    }
+    throw e;
+}
+```
+
+---
+
+### 15. Criando Métricas de Negócio Customizadas
+
+Além das métricas automáticas e das geradas pelo `@Logged`, o desenvolvedor pode registrar métricas de negócio diretamente no `MeterRegistry`.
+
+**Counter — eventos de negócio:**
+
+```java
+@ApplicationScoped
+public class PedidoService {
+
+    private final MeterRegistry meterRegistry;
+
+    public PedidoService(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
+    }
+
+    public Pedido criar(NovoPedidoRequest request) {
+        var pedido = repository.salvar(new Pedido(request));
+
+        // Conta pedidos criados por canal — tags de baixa cardinalidade
+        meterRegistry.counter("pedido.criado",
+            "canal",  request.canal(),     // "checkout", "app", "api"
+            "regiao", request.regiao()     // "sul", "sudeste", "norte"
+        ).increment();
+
+        LogSistematico
+            .registrando("Pedido criado")
+            .em(PedidoService.class, "criar")
+            .porque("Solicitação do cliente via checkout")
+            .comDetalhe("eventType", "ORDER_CREATED")
+            .comDetalhe("pedidoId",  pedido.getId())
+            .info();
+
+        return pedido;
+    }
+}
+```
+
+**Timer manual — operações sem `@Logged`:**
+
+```java
+public NotaFiscal emitirNotaFiscal(Pedido pedido) {
+    // Timer com Sample para operações com código de resultado variável
+    var sample = Timer.start(meterRegistry);
+
+    try {
+        var nota = apiSefaz.emitir(pedido);
+
+        sample.stop(Timer.builder("nota.fiscal.emissao")
+            .tag("resultado", "sucesso")
+            .publishPercentileHistogram()
+            .register(meterRegistry));
+
+        return nota;
+
+    } catch (SefazException e) {
+        sample.stop(Timer.builder("nota.fiscal.emissao")
+            .tag("resultado", "falha")
+            .tag("codigo",    e.getCodigo())    // ex: "rejeicao_534", "timeout"
+            .publishPercentileHistogram()
+            .register(meterRegistry));
+        throw e;
+    }
+}
+```
+
+**Gauge — estado corrente:**
+
+```java
+@ApplicationScoped
+public class FilaProcessamento {
+
+    private final Queue<Pedido> fila = new ConcurrentLinkedQueue<>();
+
+    public FilaProcessamento(MeterRegistry meterRegistry) {
+        // O Gauge observa o tamanho da fila — atualizado automaticamente a cada scrape
+        Gauge.builder("fila.processamento.tamanho", fila, Queue::size)
+            .description("Número de pedidos aguardando processamento")
+            .register(meterRegistry);
+    }
+
+    public void enfileirar(Pedido pedido) {
+        fila.offer(pedido);
+    }
+}
+```
+
+**Anotações declarativas (`@Timed`, `@Counted`):**
+
+```java
+@ApplicationScoped
+public class RelatorioService {
+
+    // Timer automático via interceptor CDI do Micrometer
+    @Timed(value = "relatorio.geracao",
+           extraTags = {"tipo", "vendas"},
+           histogram = true,
+           description = "Tempo de geração de relatório de vendas")
+    public Relatorio gerarVendas(Periodo periodo) {
+        // ...
+    }
+
+    // Counter automático via interceptor CDI do Micrometer
+    @Counted(value = "relatorio.solicitacoes",
+             extraTags = {"tipo", "estoque"})
+    public Relatorio gerarEstoque(Periodo periodo) {
+        // ...
+    }
+}
+```
+
+---
+
+### 16. Exportação Unificada via OTLP (`quarkus-micrometer-opentelemetry`)
+
+Quando o OTel Collector já está no pipeline de telemetria, a extensão `quarkus-micrometer-opentelemetry` unifica métricas (Micrometer), traces e logs em um único protocolo OTLP — eliminando o endpoint Prometheus separado:
+
+```xml
+<!-- Substitui quarkus-micrometer-registry-prometheus -->
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-micrometer-opentelemetry</artifactId>
+</dependency>
+```
+
+```properties
+# Todas as métricas, traces e logs saem pelo mesmo endpoint OTLP
+quarkus.otel.exporter.otlp.endpoint=http://otel-collector:4317
+
+# Métricas via OTLP — período de exportação (padrão: 60s)
+# quarkus.otel.metric.export.interval=60s
+```
+
+Com essa configuração, o OTel Collector recebe os três sinais via OTLP e os roteia para os backends apropriados — Grafana Tempo para traces, Prometheus/Thanos para métricas, Loki para logs — sem nenhuma alteração no código da aplicação.
+
+---
+
+### 17. Diagrama de Fluxo — Ciclo de Vida de uma Métrica
+
+```
+Método de negócio (@Logged)
+        │
+        ▼
+LogInterceptor.interceptar()
+  ├─ Timer.start(meterRegistry)       ← cronômetro iniciado
+  ├─ contexto.proceed()               ← execução do método
+  │
+  ├─ [se exceção]
+  │    └─ meterRegistry.counter("metodo.falha", ...).increment()
+  │
+  └─ [finally]
+       └─ Timer.stop(...)              ← duração registrada no MeterRegistry
+            └─ publishPercentileHistogram() → histograma local acumulado
+                │
+                ▼
+       MeterRegistry (em memória)
+                │
+                │  Pull (Prometheus scrape a cada ~15s)
+                │  ou
+                │  Push (OTLP export a cada ~60s)
+                ▼
+       Backend de coleta
+         ├── Prometheus → Grafana (métricas isoladas)
+         └── OTel Collector → Grafana Tempo + Grafana (métricas + traces + logs)
+
+Correlação:
+  Log emitido no mesmo método:
+  └─ JSON inclui traceId + spanId → navegável para o trace no Jaeger/Tempo
+  Métrica do mesmo método:
+  └─ tags{classe, metodo} → filtrável no Grafana com o mesmo contexto
+```
+
+---
+
+## Referências
+
+**Documentação Quarkus:**
+- [Quarkus — Micrometer Metrics Guide](https://quarkus.io/guides/telemetry-micrometer)
+- [Quarkus — Observability in Quarkus](https://quarkus.io/guides/observability)
+- [Quarkus — Micrometer and OpenTelemetry](https://quarkus.io/guides/telemetry-micrometer-to-opentelemetry)
+- [Quarkus — Using OpenTelemetry](https://quarkus.io/guides/opentelemetry)
+- [Quarkus — Observability Dev Services (LGTM)](https://quarkus.io/guides/observability-devservices-lgtm)
+
+**Micrometer:**
+- [Micrometer Concepts — Naming](https://docs.micrometer.io/micrometer/reference/concepts/naming)
+- [Micrometer Concepts — Timers](https://docs.micrometer.io/micrometer/reference/concepts/timers)
+- [Micrometer Concepts — Counters](https://docs.micrometer.io/micrometer/reference/concepts/counters)
+- [Micrometer Concepts — Gauges](https://docs.micrometer.io/micrometer/reference/concepts/gauges)
+- [Micrometer Concepts — Distribution Summaries](https://docs.micrometer.io/micrometer/reference/concepts/distribution-summaries)
+
+**Padrões de microsserviços:**
+- Chris Richardson — [Application Logging (microservices.io)](https://microservices.io/patterns/observability/application-logging.html)
+- Chris Richardson — [Distributed Tracing (microservices.io)](https://microservices.io/patterns/observability/distributed-tracing.html)
+- Iluwatar — [java-design-patterns: microservices-log-aggregation](https://github.com/iluwatar/java-design-patterns/tree/master/microservices-log-aggregation)
+
+**Observabilidade e SRE:**
+- Charity Majors, Liz Fong-Jones, George Miranda — *Observability Engineering* (O'Reilly, 2022)
+- Betsy Beyer, Chris Jones et al. — *Site Reliability Engineering* (Google, 2016) — capítulos de monitoramento e alertas
+- Cindy Sridharan — *Distributed Systems Observability* (O'Reilly, 2018)
+- [Google SRE Book — Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/)
+
+**Ferramentas:**
+- [Prometheus](https://prometheus.io/) — coleta de métricas e alertas
+- [Grafana](https://grafana.com/) — dashboards e visualização
+- [Grafana Loki](https://grafana.com/oss/loki/) — armazenamento e consulta de logs
+- [Grafana Tempo](https://grafana.com/oss/tempo/) — armazenamento de traces
+- [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) — pipeline de telemetria agnóstico de vendor

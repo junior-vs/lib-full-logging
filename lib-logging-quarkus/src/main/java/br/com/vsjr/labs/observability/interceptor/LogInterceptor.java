@@ -3,10 +3,14 @@ package br.com.vsjr.labs.observability.interceptor;
 
 import br.com.vsjr.labs.observability.annotations.Logged;
 import br.com.vsjr.labs.observability.context.GerenciadorContextoLog;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import jakarta.enterprise.inject.Instance;
 import jakarta.annotation.Priority;
 import jakarta.interceptor.AroundInvoke;
 import jakarta.interceptor.Interceptor;
 import jakarta.interceptor.InvocationContext;
+import org.jboss.logging.Logger;
 
 
 
@@ -24,27 +28,107 @@ import jakarta.interceptor.InvocationContext;
  * são responsabilidade do {@link br.com.vsjr.labs.observability.filtro.LogContextoFiltro} e
  * permanecem intactos durante toda a execução da requisição.</p>
  *
- * <p><b>Métricas:</b> serão implementadas em módulo separado, mantendo
- * a responsabilidade única deste interceptor.</p>
+ * <p><b>Métricas:</b> registra duração de execução ({@code metodo.execucao}) e
+ * falhas por tipo de exceção ({@code metodo.falha}) com isolamento de falha de
+ * infraestrutura: qualquer erro de medição é apenas registrado em WARN e nunca
+ * interrompe o fluxo de negócio.</p>
  */
 @Logged
 @Interceptor
 @Priority(Interceptor.Priority.APPLICATION)
 public class LogInterceptor {
 
-    GerenciadorContextoLog gerenciador;
+    private static final Logger LOG = Logger.getLogger(LogInterceptor.class);
 
-    public LogInterceptor(GerenciadorContextoLog gerenciador) {
+    private final GerenciadorContextoLog gerenciador;
+    private final MeterRegistry meterRegistry;
+
+    public LogInterceptor(GerenciadorContextoLog gerenciador, Instance<MeterRegistry> meterRegistryInstance) {
         this.gerenciador = gerenciador;
+        this.meterRegistry = meterRegistryInstance.isResolvable() ? meterRegistryInstance.get() : null;
     }
 
     @AroundInvoke
     public Object interceptar(InvocationContext contexto) throws Exception {
         gerenciador.enriquecer(contexto);
+        var sample = iniciarAmostra();
         try {
             return contexto.proceed();
+        } catch (Throwable erro) {
+            registrarFalha(contexto, erro);
+            if (erro instanceof Exception excecao) {
+                throw excecao;
+            }
+            if (erro instanceof Error falhaGrave) {
+                throw falhaGrave;
+            }
+            throw new RuntimeException(erro);
         } finally {
+            registrarExecucao(contexto, sample);
             gerenciador.limparEnriquecimento();
         }
+    }
+
+    private Timer.Sample iniciarAmostra() {
+        if (meterRegistry == null) {
+            return null;
+        }
+        return Timer.start(meterRegistry);
+    }
+
+    private void registrarFalha(InvocationContext contexto, Throwable erro) {
+        if (meterRegistry == null) {
+            return;
+        }
+        try {
+            meterRegistry.counter(
+                    "metodo.falha.total",
+                    "classe", resolverClasse(contexto),
+                    "metodo", resolverMetodo(contexto),
+                    "excecao", erro.getClass().getSimpleName()
+            ).increment();
+        } catch (Exception metricaFalhou) {
+            LOG.warnf("Falha ao registrar métrica: %s", metricaFalhou.getMessage());
+        }
+    }
+
+    private void registrarExecucao(InvocationContext contexto, Timer.Sample sample) {
+        if (meterRegistry == null || sample == null) {
+            return;
+        }
+        try {
+            sample.stop(Timer.builder("metodo.execucao")
+                    .tag("classe", resolverClasse(contexto))
+                    .tag("metodo", resolverMetodo(contexto))
+                    .publishPercentileHistogram()
+                    .register(meterRegistry));
+        } catch (Exception metricaFalhou) {
+            LOG.warnf("Falha ao registrar métrica: %s", metricaFalhou.getMessage());
+        }
+    }
+
+    private String resolverClasse(InvocationContext contexto) {
+        var classeDeclarada = contexto.getMethod().getDeclaringClass();
+        if (classeDeclarada != null) {
+            return classeDeclarada.getSimpleName();
+        }
+        var alvo = contexto.getTarget();
+        if (alvo == null) {
+            return "Desconhecido";
+        }
+        var classeAlvo = alvo.getClass();
+        var nomeClasse = classeAlvo.getSimpleName();
+        if (!nomeClasse.isBlank()) {
+            return nomeClasse;
+        }
+        var superClasse = classeAlvo.getSuperclass();
+        if (superClasse != null) {
+            return superClasse.getSimpleName();
+        }
+        return "Desconhecido";
+    }
+
+    private String resolverMetodo(InvocationContext contexto) {
+        return contexto.getMethod().getName();
     }
 }
