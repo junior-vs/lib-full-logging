@@ -852,8 +852,200 @@ public class RelatorioService {
     }
 }
 ```
- ,
+
 ---
+
+### 15.1. Padrão Monitor Externo
+
+O Monitor Externo é um padrão de organização de código que responde a uma tensão real em sistemas instrumentados: **objetos de domínio de negócio não deveriam carregar referências ao sistema de observabilidade**.
+
+Um `PedidoService` que injeta `MeterRegistry` apenas para emitir Gauges de estado está misturando duas responsabilidades que têm razões de mudança distintas — a lógica de processamento de pedidos e a estratégia de observabilidade do sistema. Se a equipe de plataforma decide mudar as tags de uma métrica, ou adicionar um novo Gauge, o objeto de domínio precisa ser alterado.
+
+O padrão resolve isso com um bean CDI dedicado exclusivamente à observabilidade — um **monitor** que observa o objeto de domínio de fora, sem que o objeto saiba que está sendo monitorado.
+
+---
+
+**Fundamento conceitual — white-box vs. black-box monitoring**
+
+A distinção vem do *SRE Book* (Beyer et al., cap. 10):
+
+| Estratégia | O objeto instrumentado... | Acoplamento | Adequado para |
+|---|---|---|---|
+| **White-box** | emite suas próprias métricas — chama `meterRegistry` diretamente | Alto — objeto conhece o sistema de métricas | Infraestrutura técnica: pool, cache, executor, fila técnica |
+| **Black-box (Monitor Externo)** | expõe apenas estado natural via getters — não sabe que está sendo observado | Zero — objeto ignora a existência de métricas | Domínio de negócio: `PedidoService`, `PagamentoService`, `EstoqueService` |
+
+A regra prática: **se o objeto pertence ao domínio de negócio, use Monitor Externo**. Se pertence à camada de infraestrutura ou utilitários técnicos, white-box é aceitável — o objeto já é intrinsecamente técnico.
+
+---
+
+**Estrutura do padrão**
+
+```
+ObjetoDeDomínio          — lógica de negócio, estado, zero referência a métricas
+MonitorExterno           — observabilidade, zero lógica de negócio
+MeterRegistry            — infraestrutura, zero conhecimento dos dois acima
+```
+
+O `MonitorExterno` é um bean CDI `@ApplicationScoped` que recebe o objeto de domínio via injeção de construtor e registra os Gauges no `MeterRegistry` — usando o Padrão 2 (`Gauge.builder` com `ToDoubleFunction`) como mecanismo de implementação.
+
+---
+
+**Exemplo — `PedidoService` observado por `PedidoServiceMonitor`**
+
+O objeto de domínio expõe apenas o estado que naturalmente já exporia — getters que fazem sentido para a lógica de negócio, independentemente de qualquer observabilidade:
+
+```java
+// Objeto de domínio — zero conhecimento de métricas
+@ApplicationScoped
+public class PedidoService {
+
+    // Estado interno com acesso de leitura — exposto para o negócio, não para métricas
+    private final ConcurrentLinkedDeque<Pedido> aguardandoPagamento = new ConcurrentLinkedDeque<>();
+    private final ConcurrentLinkedDeque<Pedido> aguardandoEstoque   = new ConcurrentLinkedDeque<>();
+    private final AtomicLong                    totalRecusados      = new AtomicLong(0);
+
+    private final PedidoRepository repository;
+
+    public PedidoService(PedidoRepository repository) {
+        this.repository = repository;
+    }
+
+    public Pedido criar(NovoPedidoRequest request) {
+        var pedido = repository.salvar(new Pedido(request));
+        aguardandoPagamento.addLast(pedido);
+        return pedido;
+    }
+
+    public void confirmarPagamento(Pedido pedido) {
+        aguardandoPagamento.remove(pedido);
+        aguardandoEstoque.addLast(pedido);
+    }
+
+    public void recusar(Pedido pedido, String motivo) {
+        aguardandoPagamento.remove(pedido);
+        totalRecusados.incrementAndGet();
+    }
+
+    public void despachar(Pedido pedido) {
+        aguardandoEstoque.remove(pedido);
+    }
+
+    // Getters de estado — existem para o negócio, não para métricas
+    public int  qtdAguardandoPagamento() { return aguardandoPagamento.size(); }
+    public int  qtdAguardandoEstoque()   { return aguardandoEstoque.size(); }
+    public long totalPedidosRecusados()  { return totalRecusados.get(); }
+}
+```
+
+O monitor é um bean separado, sem nenhuma lógica de negócio. Sua única responsabilidade é conectar o estado do `PedidoService` ao `MeterRegistry`:
+
+```java
+// Monitor Externo — observabilidade pura, zero lógica de negócio
+@ApplicationScoped
+public class PedidoServiceMonitor {
+
+    // Referência forte ao objeto monitorado — necessária porque Gauge usa referência fraca
+    private final PedidoService pedidoService;
+
+    public PedidoServiceMonitor(PedidoService pedidoService, MeterRegistry meterRegistry) {
+        this.pedidoService = pedidoService;
+
+        // Cada Gauge observa o PedidoService de fora, via ToDoubleFunction
+        Gauge.builder("pedido.estado.aguardando_pagamento", pedidoService,
+                      s -> s.qtdAguardandoPagamento())
+            .description("Pedidos confirmados aguardando aprovação de pagamento")
+            .register(meterRegistry);
+
+        Gauge.builder("pedido.estado.aguardando_estoque", pedidoService,
+                      s -> s.qtdAguardandoEstoque())
+            .description("Pedidos com pagamento aprovado aguardando reserva de estoque")
+            .register(meterRegistry);
+
+        Gauge.builder("pedido.recusados.total", pedidoService,
+                      s -> s.totalPedidosRecusados())
+            .description("Total acumulado de pedidos recusados desde a inicialização")
+            .register(meterRegistry);
+    }
+}
+```
+
+O `PedidoService` permanece idêntico com ou sem observabilidade. Para adicionar um novo Gauge, alterar tags ou remover uma métrica, somente o `PedidoServiceMonitor` é tocado.
+
+---
+
+**Extensão — Monitor com estado calculado periodicamente**
+
+Quando o estado a observar não está em memória mas em uma fonte externa — banco de dados, API, cache distribuído — o Monitor Externo combina com um job agendado. O monitor mantém `AtomicLong` como suporte (Padrão 3) e os atualiza a partir da fonte:
+
+```java
+@ApplicationScoped
+public class PedidoEstadoBancoDadosMonitor {
+
+    private final AtomicLong pedidosPendentes  = new AtomicLong(0);
+    private final AtomicLong pedidosBloqueados = new AtomicLong(0);
+
+    private final PedidoRepository repository;
+
+    public PedidoEstadoBancoDadosMonitor(PedidoRepository repository,
+                                         MeterRegistry meterRegistry) {
+        this.repository = repository;
+
+        // Gauges observam os AtomicLong — referência forte mantida pelo bean @ApplicationScoped
+        Gauge.builder("pedido.estado.pendente", pedidosPendentes, AtomicLong::get)
+            .description("Pedidos no estado PENDENTE — atualizado a cada 30s")
+            .register(meterRegistry);
+
+        Gauge.builder("pedido.estado.bloqueado", pedidosBloqueados, AtomicLong::get)
+            .description("Pedidos BLOQUEADOS aguardando revisão manual")
+            .register(meterRegistry);
+    }
+
+    @Scheduled(every = "30s")
+    void sincronizar() {
+        try {
+            // SELECT estado, COUNT(*) FROM pedidos GROUP BY estado
+            var contagens = repository.contarPorEstado();
+            pedidosPendentes.set(contagens.getOrDefault("PENDENTE",   0L));
+            pedidosBloqueados.set(contagens.getOrDefault("BLOQUEADO", 0L));
+        } catch (Exception e) {
+            // Falha do monitor não afeta o negócio — Gauge mantém último valor conhecido
+            log.warn("Falha ao sincronizar métricas de estado de pedidos do banco: {}",
+                     e.getMessage());
+        }
+    }
+}
+```
+
+> **Separação de responsabilidades no `@Scheduled`:** o job de sincronização pertence ao monitor, não ao repositório nem ao service. O repositório executa a query; o monitor decide quando executá-la e como mapear o resultado para métricas.
+
+---
+
+**Convenção de nomenclatura para monitores**
+
+Para tornar a intenção explícita no código e facilitar a navegação:
+
+| Objeto monitorado | Monitor externo |
+|---|---|
+| `PedidoService` | `PedidoServiceMonitor` |
+| `FilaProcessamento` | `FilaProcessamentoMonitor` |
+| `EstoqueService` | `EstoqueServiceMonitor` |
+
+Todos os monitores são `@ApplicationScoped`, não carregam lógica de negócio, e têm um único ponto de entrada para alterações de observabilidade — o construtor onde os Gauges são registrados.
+
+---
+
+**Relação com os três padrões de Gauge**
+
+O Monitor Externo não é um mecanismo do Micrometer — é um padrão de organização que se implementa sobre os mecanismos existentes:
+
+| Mecanismo interno | Padrão de organização | Resultado |
+|---|---|---|
+| `gaugeCollectionSize` | White-box (objeto técnico) | Fila técnica auto-instrumentada |
+| `Gauge.builder` + `ToDoubleFunction` | **Monitor Externo** | Domínio observado de fora |
+| `Gauge.builder` + `AtomicLong` | **Monitor Externo** + `@Scheduled` | Estado de banco observado de fora |
+
+---
+
 
 ### 16. Exportação Unificada via OTLP (`quarkus-micrometer-opentelemetry`)
 
